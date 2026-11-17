@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.7.3（正式发布，2026-11-18）
+
+- **修复 Python 3.12+ 工具桥关闭死锁与 Windows 目录释放竞态（PR #22）**：Python 3.12.1+ 中 `asyncio.Server.wait_closed()` 会等待所有活跃客户端连接协程退出后才返回；`ToolBroker._close()` 调整为先关闭监听、取消待处理调用 `future` 与连接任务并 `gather`，最后再 `await server.wait_closed()`，消除工具交接后取消或插件停用时阻塞至 `tool_execution_timeout`（默认 120s）的死锁。同时新增 `remove_tree_robust()` 有界重试并在 Windows 无 Job Object 且前端进程先退出时仍执行 `taskkill /T`，消除后代进程 `cwd` 句柄短暂延迟释放引发的 `WinError 32`。
+- **同会话并发请求隔离与排队保护**：活跃 `ToolTurn` 等待原调用方回填工具结果期间，通过 `signal is existing_turn.signal` 严格区分续轮所有权——同会话外部请求的预检失败不再误关闭或污染原工具轮与 `TurnMeter`；正常并发新消息在 `queue_timeout` 内通过 `done_event` 排队等待前序工具轮结束再接力执行，超时仅自身返回 `BUSY`；非当前拥有者的迟到 `tool` 续轮安全拒绝为 `TOOL_STALE`。
+- **补全 Gemini 复合数组 Schema 适配**：`_sanitize_for_gemini()` 递归覆盖 `anyOf` / `oneOf` / `allOf`（如 Pydantic `list | None = None`）、字典形态 `additionalProperties`、联合类型列表 `["array", "null"]`，递归深度上限对齐 `validate_schema`（32 层）；宿主执行校验仍使用独立深拷贝的原始 `to_host_schema`，不收窄合法参数范围。
+- **PNG 压缩辅助块无损剥离与索引色兼容**：在校验块长度与 CRC32 后剥离 `zTXt` / `iCCP` / `iTXt` 辅助块再重组 PNG（既消除元数据解压放大风险，又兼容携带 Display P3 `iCCP` 或截图元数据的 macOS/iOS/Windows 截图）；新增 8 位调色板索引色 PNG（`color == 3` 及前置 `PLTE` 校验）支持。
+- **探测缓存、异步磁盘 I/O 与长历史二分裁剪**：`discover()` 并行采集 `--version` 与 `acp --help`，按二进制路径与文件 `stat` 缓存并记录 `supports_login` 供 `LoginFlow` 直接复用；异步路径中的 `make_home()` 与本地媒体读取 `_local()` 移入 `asyncio.to_thread`；`replay()` 与 `prompt_blocks()` 改用二分查找定位裁剪边界并预计算图片哈希，保持与逐条裁剪字节级等价。
+- **版本单点化、孤儿目录清扫与发布归档卫生**：新增零依赖 `agy_provider/_version.py` 统一供给 `main.py`、ACP `clientInfo`、MCP `serverInfo` 并由 `tests/test_release_hygiene.py` 与 `metadata.yaml` 强校验；插件初始化时后台清扫超过空闲阈值的非活跃 `preflight-*` / `login-*` / `runtime-*` 残留目录；补齐 `_conf_schema.json` 的 `enable_images` 与 `media_roots` 提示；新增 `.gitattributes` 在 `main.zip` / Release 归档中排除 `tests`、`docs`、`review-bundle`、`tools`、`.github` 等非运行文件；增强 `tools/check_sensitive.py`（支持 `--staged`、Google OAuth `ya29.` / `1//`、`gh[ousr]_` 及内嵌账密代理 URL 检测）。
+- **验证**：离线全量 Python 回归 267 项（Windows 本地 263 通过、4 按平台/权限跳过、0 失败），前端 `node --test` 19/19 通过，`compileall`、`check_sensitive.py`、`git diff --check` 通过；Ubuntu / Windows × Python 3.11 / 3.12 CI 矩阵全绿。本版未执行新增生产宿主实机冒烟。
+
 ## 0.7.2（正式发布，2026-11-17）
 
 - **修复 #19：Safe Mode 第 4 条规则相关的上游 429**。AstrBot 4.29.4 在 system prompt 最前端加入 6 条 Safe Mode 规则。在报告者与维护者的对照环境中，含第 4 条 `Follow style/role-play instructions …` 的请求出现 detail-free `429 RESOURCE_EXHAUSTED`，同环境仅改写措辞则正常返回；不同账号和出口的独立测试也观察到相似现象。单变量实验表明特定句式与错误高度相关，但**无法据此确认 Google 内部的匹配算法、违规判定机制，或排除其他环境下的额度/网络因素**。上游已有相关修改提案，4.29.4 存量用户仍需插件侧的定点兼容。
