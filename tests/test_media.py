@@ -1,6 +1,8 @@
 import base64
+import binascii
 import struct
 import unittest
+import zlib
 
 from agy_provider.config import Settings
 from agy_provider.errors import AgyError
@@ -172,6 +174,60 @@ class JpegMediaTests(unittest.TestCase):
         with self.assertRaises(AgyError) as caught:
             validate_image(with_trailer, "image/jpeg", settings)
         self.assertEqual(caught.exception.code, "IMAGE_BYTES")
+
+
+def _png_chunk(kind: bytes, body: bytes) -> bytes:
+    crc = binascii.crc32(kind + body) & 0xFFFFFFFF
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+
+def _build_png(*, color: int = 2, extra_chunks: list[bytes] | None = None, raw_rows: bytes | None = None) -> bytes:
+    ihdr = struct.pack(">IIBBBBB", 2, 2, 8, color, 0, 0, 0)
+    if raw_rows is None:
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color]
+        raw_rows = (b"\x00" + b"\x10" * (2 * channels)) * 2
+    idat = zlib.compress(raw_rows)
+    chunks = [_png_chunk(b"IHDR", ihdr), *(extra_chunks or []), _png_chunk(b"IDAT", idat), _png_chunk(b"IEND", b"")]
+    return b"\x89PNG\r\n\x1a\n" + b"".join(chunks)
+
+
+class PngMediaTests(unittest.TestCase):
+    def setUp(self):
+        self.settings = Settings(enable_images=True)
+
+    def test_png_strips_iccp_itxt_ztxt_and_rejects_corrupt_crc(self):
+        iccp = _png_chunk(b"iCCP", b"Display P3\x00\x00" + zlib.compress(b"icc-profile"))
+        itxt = _png_chunk(b"iTXt", b"XML:com.adobe.xmp\x00\x00\x00\x00\x00<xmp/>")
+        ztxt = _png_chunk(b"zTXt", b"Software\x00\x00" + zlib.compress(b"Snipaste"))
+        raw = _build_png(extra_chunks=[iccp, itxt, ztxt])
+        clean_expected = _build_png()
+
+        block = validate_image(raw, "image/png", self.settings)
+        decoded = base64.b64decode(block["data"])
+        self.assertEqual(decoded, clean_expected)
+        for marker in (b"iCCP", b"iTXt", b"zTXt"):
+            self.assertNotIn(marker, decoded)
+
+        # 损坏 CRC 的辅助块依然必须被拒绝
+        corrupt = raw[:-16] + b"\xff" + raw[-15:]
+        with self.assertRaises(AgyError):
+            validate_image(corrupt, "image/png", self.settings)
+
+    def test_indexed_palette_png_accepted_and_invalid_plte_rejected(self):
+        plte = _png_chunk(b"PLTE", b"\xff\x00\x00\x00\xff\x00")
+        indexed = _build_png(color=3, extra_chunks=[plte], raw_rows=b"\x00\x00\x01\x00\x01\x00")
+        block = validate_image(indexed, "image/png", self.settings)
+        self.assertEqual(base64.b64decode(block["data"]), indexed)
+
+        # 索引色缺少 PLTE 拒绝
+        with self.assertRaises(AgyError) as missing_plte:
+            validate_image(_build_png(color=3), "image/png", self.settings)
+        self.assertEqual(missing_plte.exception.code, "IMAGE_FORMAT")
+
+        # 灰度图携带 PLTE 拒绝
+        with self.assertRaises(AgyError) as gray_plte:
+            validate_image(_build_png(color=0, extra_chunks=[plte]), "image/png", self.settings)
+        self.assertEqual(gray_plte.exception.code, "IMAGE_FORMAT")
 
 
 if __name__ == "__main__":

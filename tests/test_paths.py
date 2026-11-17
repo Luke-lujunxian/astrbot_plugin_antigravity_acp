@@ -11,7 +11,7 @@ from tests import astrbot_stub  # noqa: F401 -- install the offline host logger
 
 from agy_provider.config import Settings
 from agy_provider.login import LoginFlow
-from agy_provider.paths import windows_long_path
+from agy_provider.paths import cleanup_stale_dirs, windows_long_path
 from agy_provider.probe import probe
 from agy_provider.process import AGENT_NAME, LaunchInfo, launch_args, make_home
 from agy_provider.sessions import Runtime, Session
@@ -44,6 +44,41 @@ class PathTests(unittest.TestCase):
                     result = windows_long_path(PureWindowsPath(source))
                     self.assertEqual(str(result), expected)
                     self.assertIs(windows_long_path(result), result)
+
+    def test_cleanup_stale_dirs_removes_expired_isolated_dirs_and_preserves_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ns_dead = root / ("a" * 16)
+            ns_live = root / ("b" * 16)
+            old_rt = ns_dead / "runtime-old"
+            active_rt = ns_live / "runtime-active"
+            fresh_rt = ns_live / "runtime-fresh"
+            old_pre = root / "preflight-old"
+            old_login = root / "login-old"
+            unrelated = root / "custom-keep"
+            for d in (old_rt, active_rt, fresh_rt, old_pre, old_login, unrelated):
+                d.mkdir(parents=True)
+                (d / "marker.txt").write_text("x", encoding="utf-8")
+            # 将陈旧目录和活跃目录时间戳拨回 2 小时前，验证年龄阈值与 active_names 保护
+            past = 100000.0
+            for d in (old_rt, active_rt, old_pre, old_login, unrelated):
+                os.utime(d, (past, past))
+            os.utime(fresh_rt, (past + 7000.0, past + 7000.0))
+
+            removed = cleanup_stale_dirs(
+                root,
+                active_names={"runtime-active"},
+                min_age_seconds=3600.0,
+                now=past + 7200.0,
+            )
+            self.assertEqual(removed, 3)
+            self.assertFalse(old_rt.exists())
+            self.assertFalse(ns_dead.exists())
+            self.assertFalse(old_pre.exists())
+            self.assertFalse(old_login.exists())
+            self.assertTrue(active_rt.exists())
+            self.assertTrue(fresh_rt.exists())
+            self.assertTrue(unrelated.exists())
 
 
 @unittest.skipUnless(os.name == "nt", "Requires Windows filesystem semantics")

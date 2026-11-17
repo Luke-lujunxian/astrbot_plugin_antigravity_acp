@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._version import PLUGIN_VERSION
 from .config import Settings
 from .context_usage import ContextUsage
 from .errors import AgyError, classified_error, remote_error
@@ -133,7 +134,7 @@ class AcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "astrbot-agy-provider", "version": "0.7.2"},
+                    "clientInfo": {"name": "astrbot-agy-provider", "version": PLUGIN_VERSION},
                 },
                 self.settings.startup_timeout,
             )

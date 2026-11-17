@@ -13,13 +13,18 @@
 ## 提交前扫描
 
 ```sh
-python tools/check_sensitive.py          # 全仓库
-python tools/check_sensitive.py 文件     # 指定文件
+python tools/check_sensitive.py            # 全仓库
+python tools/check_sensitive.py --staged   # 仅扫描 Git 暂存区变更文件（可挂载 pre-commit）
+python tools/check_sensitive.py 文件       # 指定文件
 ```
 
-规则：邮箱、中国大陆手机号、常见 API Key 形态、认证元数据字段（带值的 `authMethod` /
+规则：邮箱、中国大陆手机号、常见 API Key 与 Google OAuth 令牌形态（`ya29.` / `1//` / `gh[pousr]_` 等）、内嵌账密的代理 URL、认证元数据字段（带值的 `authMethod` /
 `quotaProject` / `access_token` 等）。命中返回非零退出码，CI 已接入该检查。
-白名单只放通用占位符（`example.com` 等），不放真实账号。
+白名单只放通用占位符（`example.com`、`fake-password` 等），不放真实账号。
+
+## 归档分发排除（`.gitattributes`）
+
+仓库根目录的 [`.gitattributes`](../.gitattributes) 将 `tests/`、`docs/`、`review-bundle/`、`tools/`、`.github/` 及历史报告标记为 `export-ignore`，确保用户下载 GitHub `main.zip` 或 Release 源码包时仅包含插件运行时所需文件，不影响 `git clone` 与 CI 回归。
 
 ## review-bundle/ 的定位
 

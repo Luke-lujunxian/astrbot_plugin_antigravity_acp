@@ -120,8 +120,12 @@ class LoginFlow:
             async with asyncio.timeout_at(self.expires_at):
                 info = await discover(self.settings)
                 env = build_child_env(self.settings)
-                help_text = await capture([info.binary, "acp", "--help"], self.settings.startup_timeout, env=env)
-                if "--login" not in help_text:
+                if info.supports_login is None:
+                    help_text = await capture([info.binary, "acp", "--help"], self.settings.startup_timeout, env=env)
+                    supports_login = "--login" in help_text
+                else:
+                    supports_login = info.supports_login
+                if not supports_login:
                     raise AgyError("UNSUPPORTED", "此 CLI 不支持面板登录，请使用终端 agy 完成登录。")
                 self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 with tempfile.TemporaryDirectory(prefix="login-", dir=self.root) as directory:

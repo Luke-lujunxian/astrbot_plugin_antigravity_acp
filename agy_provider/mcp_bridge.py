@@ -8,8 +8,10 @@ import threading
 from concurrent.futures import TimeoutError as FutureTimeout
 
 if __package__:
+    from ._version import PLUGIN_VERSION
     from .bridge_transport import TOKEN_ENV, connect, read_frame
 else:
+    from _version import PLUGIN_VERSION
     from bridge_transport import TOKEN_ENV, connect, read_frame
 
 LIMIT = 1048576
@@ -77,7 +79,7 @@ async def main(path):
                 result = {
                     "protocolVersion": "2025-11-25",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "astrbot", "version": "0.7.2"},
+                    "serverInfo": {"name": "astrbot", "version": PLUGIN_VERSION},
                 }
             elif method == "ping":
                 result = {}

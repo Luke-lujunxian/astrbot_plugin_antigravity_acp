@@ -362,24 +362,41 @@ def replay(messages: list[dict], budget: int) -> tuple[str, int]:
         body = body.replace("<", "\\u003c").replace(">", "\\u003e")
         return f"<astrbot_history>\n{body}\n</astrbot_history>\n\n{latest}"
 
-    # Keep a contiguous tail of complete turns. The current input is never cut.
+    # 保留连续完整的尾部对话轮次，使用二分查找避免长历史 O(N^2) 重复序列化；绝不截断当前输入。
     history = messages[:-1]
-    omitted = 0
-    while history:
-        packed = encode(history, omitted)
-        if len(packed.encode()) <= budget:
-            return packed, omitted
-        history = history[1:]
-        omitted += 1
-        while history and history[0]["role"] == "assistant":
-            history = history[1:]
-            omitted += 1
-    packed = encode([], omitted)
+    packed = encode(history, 0)
+    if len(packed.encode()) <= budget:
+        return packed, 0
+    cuts = []
+    idx = 0
+    n = len(history)
+    while idx < n:
+        idx += 1
+        while idx < n and history[idx]["role"] == "assistant":
+            idx += 1
+        if idx < n:
+            cuts.append(idx)
+    low, high = 0, len(cuts) - 1
+    best_packed = None
+    best_omitted = 0
+    while low <= high:
+        mid = (low + high) // 2
+        omitted = cuts[mid]
+        candidate = encode(history[omitted:], omitted)
+        if len(candidate.encode()) <= budget:
+            best_packed = candidate
+            best_omitted = omitted
+            high = mid - 1
+        else:
+            low = mid + 1
+    if best_packed is not None:
+        return best_packed, best_omitted
+    packed = encode([], n)
     if len(packed.encode()) > budget:
         raise AgyError(
             "INPUT_LIMIT", "当前输入已占满预算，无法附加历史截断标记，请缩短输入。"
         )
-    return packed, omitted
+    return packed, n
 
 
 def normalized_content(value, *, assistant=False, images=False):
@@ -492,19 +509,25 @@ def prompt_blocks(messages, budget):
     ):
         text, omitted = replay(messages, budget)
         return [{"type": "text", "text": text}], omitted
-    omitted = 0
-    tail = list(messages)
-    while True:
+    part_digests = {}
+    for message in messages:
+        if isinstance(message["content"], list):
+            for part in message["content"]:
+                if part["type"] == "image" and id(part) not in part_digests:
+                    part_digests[id(part)] = digest(part)
+
+    def build_window(cut_index: int):
+        tail = messages[cut_index:]
         images = []
         image_ids = {}
         history = []
-        for index, message in enumerate(tail):
+        for message in tail:
             entry = dict(message)
             if isinstance(entry["content"], list):
                 content = []
                 for part in entry["content"]:
                     if part["type"] == "image":
-                        identity = digest(part)
+                        identity = part_digests.get(id(part)) or digest(part)
                         if identity not in image_ids:
                             image_ids[identity] = len(image_ids) + 1
                             images.append(
@@ -526,7 +549,7 @@ def prompt_blocks(messages, budget):
             history.append(entry)
         body = (
             json.dumps(
-                {"omitted_messages": omitted, "messages": history}, ensure_ascii=False
+                {"omitted_messages": cut_index, "messages": history}, ensure_ascii=False
             )
             .replace("<", "\\u003c")
             .replace(">", "\\u003e")
@@ -536,10 +559,23 @@ def prompt_blocks(messages, budget):
             + body
             + "\n</astrbot_history>"
         )
-        if len(text.encode()) <= budget:
-            return [{"type": "text", "text": text}, *images], omitted
-        cut = next((i for i in range(1, len(tail)) if tail[i]["role"] == "user"), None)
-        if cut is None:
-            raise AgyError("INPUT_LIMIT", "当前完整输入超过历史预算。")
-        tail = tail[cut:]
-        omitted += cut
+        return text, images
+
+    text, images = build_window(0)
+    if len(text.encode()) <= budget:
+        return [{"type": "text", "text": text}, *images], 0
+    cuts = [i for i in range(1, len(messages)) if messages[i]["role"] == "user"]
+    low, high = 0, len(cuts) - 1
+    best_result = None
+    while low <= high:
+        mid = (low + high) // 2
+        cut_idx = cuts[mid]
+        cand_text, cand_images = build_window(cut_idx)
+        if len(cand_text.encode()) <= budget:
+            best_result = ([{"type": "text", "text": cand_text}, *cand_images], cut_idx)
+            high = mid - 1
+        else:
+            low = mid + 1
+    if best_result is not None:
+        return best_result
+    raise AgyError("INPUT_LIMIT", "当前完整输入超过历史预算。")

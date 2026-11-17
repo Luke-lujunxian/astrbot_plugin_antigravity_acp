@@ -1,6 +1,7 @@
 """Native subprocess launch, capability checks and isolated agent files."""
 
 import asyncio
+from collections import OrderedDict
 import json
 import os
 import shutil
@@ -135,13 +136,13 @@ async def _stop_process(proc: asyncio.subprocess.Process) -> None:
     if job is not None:
         await job.stop()
         proc._agy_job = None
-    # Own process group only. Windows retains taskkill /T as a fallback.
+    # 仅终止自有进程组；Windows 在无 Job Object 时即使前端进程已先退出也调用 taskkill /T 清理残留后代。
     if os.name == "posix":
         try:
             os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-    elif proc.returncode is None and job is None:
+    elif job is None and getattr(proc, "pid", None) is not None:
         try:
             killer = await asyncio.create_subprocess_exec(
                 "taskkill",
@@ -222,6 +223,10 @@ class LaunchInfo:
     version: str
     disable_telemetry: bool
     include_default_customizations: bool = False
+    supports_login: bool | None = None
+
+
+_DISCOVER_CACHE: OrderedDict[tuple, LaunchInfo] = OrderedDict()
 
 
 async def discover(settings: Settings) -> LaunchInfo:
@@ -257,29 +262,54 @@ async def discover(settings: Settings) -> LaunchInfo:
         raise AgyError("CONFIG", "请指定原生 agy.exe，不支持通过 cmd/bat 包装器启动。")
     if os.name == "posix" and not os.access(binary, os.X_OK):
         raise AgyError("PERMISSION", "AGY 文件不可执行，请检查文件权限和服务用户。")
+    cache_key = None
+    try:
+        st = Path(binary).stat()
+        cache_key = (
+            binary,
+            st.st_mtime_ns,
+            st.st_size,
+            settings.agy_customizations_mode,
+            settings.proxy_mode,
+            settings.proxy_url,
+            capture,
+        )
+    except OSError:
+        cache_key = None
+    if cache_key is not None and cache_key in _DISCOVER_CACHE:
+        _DISCOVER_CACHE.move_to_end(cache_key)
+        return _DISCOVER_CACHE[cache_key]
     env = build_child_env(settings)
-    version = await capture([binary, "--version"], settings.startup_timeout, env=env)
-    help_text = await capture(
-        [binary, "acp", "--help"], settings.startup_timeout, env=env
+    version, acp_help = await asyncio.gather(
+        capture([binary, "--version"], settings.startup_timeout, env=env),
+        capture([binary, "acp", "--help"], settings.startup_timeout, env=env),
     )
+    help_text = acp_help
     required = ("--gemini-dir", "--app-data-dir", "--agent")
     if any(flag not in help_text for flag in required) or (
         settings.agy_customizations_mode == "minimal"
         and "--include-default-customizations" not in help_text
     ):
-        # Some releases list inherited flags only in the global help.
+        # 部分 CLI 版本仅在全局 --help 中列出继承参数。
         help_text += await capture(
             [binary, "--help"], settings.startup_timeout, env=env
         )
     missing = [flag for flag in required if flag not in help_text]
     if missing:
         raise AgyError("UNSUPPORTED", "AGY 缺少隔离启动参数：" + ", ".join(missing))
-    return LaunchInfo(
+    info = LaunchInfo(
         binary,
         version.strip().splitlines()[0][:120] if version.strip() else "unknown",
         "--disable-telemetry" in help_text,
         "--include-default-customizations" in help_text,
+        "--login" in acp_help,
     )
+    if cache_key is not None:
+        _DISCOVER_CACHE[cache_key] = info
+        _DISCOVER_CACHE.move_to_end(cache_key)
+        while len(_DISCOVER_CACHE) > 32:
+            _DISCOVER_CACHE.popitem(last=False)
+    return info
 
 
 def _guardrails(mcp_tools: bool) -> str:

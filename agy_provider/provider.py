@@ -347,8 +347,13 @@ class AgyProvider(Provider):
         )
 
         existing_turn = self.runtime.turns.get(key) if key is not None else None
-        meter: TurnMeter | None = existing_turn.meter if existing_turn else None
-        is_existing_turn = existing_turn is not None
+        owns_existing_turn = (
+            existing_turn is not None
+            and signal is not None
+            and signal is existing_turn.signal
+        )
+        meter: TurnMeter | None = existing_turn.meter if owns_existing_turn else None
+        is_existing_turn = owns_existing_turn
         claimed_half_open: tuple[str, str] | None = None
         snapshot = ToolSnapshot(None)
         request = None
@@ -549,12 +554,48 @@ class AgyProvider(Provider):
                 meter.finish(
                     status="cancelled" if cancelled else "error", error_code=code
                 )
-            pending = self.runtime.turns.pop(key, None)
-            if pending:
-                await pending.close()
+            if owns_existing_turn and self.runtime.turns.get(key) is existing_turn:
+                self.runtime.turns.pop(key, None)
+                await existing_turn.close()
             raise
 
-        if snapshot.tools or key in self.runtime.turns or continuation:
+        if key is not None and not owns_existing_turn and not continuation:
+            # 同一会话存在其他调用方持有的进行中工具轮时，排队等待其结束而不误杀原会话。
+            if (
+                self.runtime.callers
+                >= self.settings.max_pending + self.settings.max_concurrent
+            ):
+                self.runtime.failure_guard.release_probe(claimed_half_open)
+                meter.finish(status="error", error_code="BUSY")
+                raise AgyError("BUSY", "AGY 等待队列已满，请稍后再试。")
+            try:
+                async with asyncio.timeout(self.settings.queue_timeout):
+                    while True:
+                        foreign = self.runtime.turns.get(key)
+                        if foreign is None or (
+                            signal is not None and signal is foreign.signal
+                        ):
+                            if key not in self.runtime.entry_locks:
+                                break
+                            await await_or_abort(asyncio.sleep(0.01), signal)
+                        else:
+                            await await_or_abort(foreign.done_event.wait(), signal)
+            except TimeoutError:
+                self.runtime.failure_guard.release_probe(claimed_half_open)
+                meter.finish(status="error", error_code="BUSY")
+                raise AgyError(
+                    "BUSY", "等待当前会话工具轮完成超时，请稍后再试。"
+                ) from None
+            except BaseException as exc:
+                self.runtime.failure_guard.release_probe(claimed_half_open)
+                cancelled = isinstance(exc, asyncio.CancelledError)
+                meter.finish(
+                    status="cancelled" if cancelled else "error",
+                    error_code="CANCELLED" if cancelled else "BUSY",
+                )
+                raise
+
+        if snapshot.tools or owns_existing_turn or continuation:
             source = chat_events(
                 self.runtime,
                 request,

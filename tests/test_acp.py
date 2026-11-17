@@ -222,3 +222,31 @@ class AcpTests(unittest.IsolatedAsyncioTestCase):
             ]
         }
         self.assertEqual(catalog_names(result), {"opaque": "Gemini"})
+
+    async def test_discover_caches_by_file_stat_and_populates_login_support(self):
+        binary = self.root / ("agy.exe" if os.name == "nt" else "agy")
+        binary.write_bytes(b"binary-v1")
+        if os.name == "posix":
+            binary.chmod(0o755)
+        mock_capture = AsyncMock(
+            side_effect=[
+                "agy 1.5.9",
+                "--gemini-dir --app-data-dir --agent --login",
+                "agy 1.6.0",
+                "--gemini-dir --app-data-dir --agent",
+            ]
+        )
+        settings = Settings(command=str(binary))
+        with patch("agy_provider.process.capture", mock_capture):
+            first = await discover(settings)
+            second = await discover(settings)
+            self.assertEqual(first, second)
+            self.assertTrue(first.supports_login)
+            # 第二次相同 stat 命中进程内缓存，不额外启动子进程
+            self.assertEqual(mock_capture.await_count, 2)
+            # 文件体积变化后缓存自动失效重测
+            binary.write_bytes(b"binary-v2-updated")
+            third = await discover(settings)
+            self.assertEqual(third.version, "agy 1.6.0")
+            self.assertFalse(third.supports_login)
+            self.assertEqual(mock_capture.await_count, 4)

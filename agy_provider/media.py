@@ -35,9 +35,12 @@ def _pixels(width, height, limit):
         raise _error("IMAGE_PIXELS", "图片尺寸超过解码像素预算。")
 
 
-def _png(data, pixel_limit):
+def _png(data, pixel_limit) -> bytes:
     pos, header, ended, compressed = 8, None, False, []
+    color_type, saw_plte = None, False
     saw_data = False
+    stripped = False
+    kept_chunks = []
     chunks = 0
     while pos < len(data):
         chunks += 1
@@ -63,22 +66,43 @@ def _png(data, pixel_limit):
                 ">IIBBBBB", body
             )
             _pixels(width, height, pixel_limit)
-            if depth != 8 or color not in {0, 2, 4, 6} or comp or filt or interlace:
-                raise _error("IMAGE_FORMAT", "PNG 仅支持非交错 8 位灰度/RGB/RGBA。")
-            header = (height, width * {0: 1, 2: 3, 4: 2, 6: 4}[color] + 1)
+            if depth != 8 or color not in {0, 2, 3, 4, 6} or comp or filt or interlace:
+                raise _error("IMAGE_FORMAT", "PNG 仅支持非交错 8 位灰度/索引色/RGB/RGBA。")
+            color_type = color
+            header = (height, width * {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color] + 1)
+            kept_chunks.append(data[pos:end])
+        elif kind == b"PLTE":
+            if (
+                saw_plte
+                or saw_data
+                or color_type in {0, 4}
+                or size == 0
+                or size > 768
+                or size % 3 != 0
+            ):
+                raise _error("IMAGE_FORMAT", "PNG 调色板结构无效。")
+            saw_plte = True
+            kept_chunks.append(data[pos:end])
         elif kind in {b"zTXt", b"iCCP", b"iTXt"}:
-            raise _error("IMAGE_FORMAT", "暂不支持含压缩或国际文本元数据的 PNG。")
+            # 校验完 CRC 后剥离压缩文本与色彩配置辅助块，既避免解压放大又兼容主流系统截图。
+            stripped = True
         elif kind == b"acTL":
             raise _error("IMAGE_FORMAT", "不支持动画图片。")
         elif kind == b"IDAT":
+            if color_type == 3 and not saw_plte:
+                raise _error("IMAGE_FORMAT", "索引色 PNG 缺少有效 PLTE 调色板。")
             saw_data = True
             compressed.append(body)
+            kept_chunks.append(data[pos:end])
         elif kind == b"IEND":
             if size or not saw_data or end != len(data):
                 raise _error()
             ended = True
-        elif kind[0] & 0x20 == 0 and kind != b"PLTE":
+            kept_chunks.append(data[pos:end])
+        elif kind[0] & 0x20 == 0:
             raise _error()
+        else:
+            kept_chunks.append(data[pos:end])
         pos = end
     if not ended or not header:
         raise _error()
@@ -100,6 +124,7 @@ def _png(data, pixel_limit):
             raise _error()
     except zlib.error:
         raise _error() from None
+    return b"".join([PNG, *kept_chunks]) if stripped else data
 
 
 def _jpeg(data, pixel_limit):
@@ -162,7 +187,7 @@ def validate_image(data: bytes, declared: str | None, settings) -> dict:
         raise _error("IMAGE_BYTES", "图片超过字节预算。")
     if data.startswith(PNG):
         mime = "image/png"
-        _png(data, settings.image_max_pixels)
+        data = _png(data, settings.image_max_pixels)
     elif data.startswith(b"\xff\xd8\xff"):
         mime = "image/jpeg"
         data = data[:_jpeg(data, settings.image_max_pixels)]
@@ -428,7 +453,7 @@ class _Images:
                 source = unquote(parsed.path)
             elif "://" in source:
                 raise _error("IMAGE_URL", "不支持此图片 URL 协议。")
-            data = _local(source, self.settings)
+            data = await asyncio.to_thread(_local, source, self.settings)
         block = validate_image(data, declared, self.settings)
         identity = hashlib.sha256(data).digest()
         if identity not in self.unique:

@@ -21,6 +21,7 @@ from .config import Settings
 from .bridge_transport import BridgeTransport, TOKEN_ENV
 from .errors import AgyError
 from .messages import digest
+from .paths import remove_tree_robust
 
 SERVER_NAME = "astrbot"
 FRAME_LIMIT = 1048576
@@ -28,26 +29,33 @@ MAX_SESSION_CALLS = 4096
 
 
 def _sanitize_for_gemini(schema, depth=0):
-    """Best-effort Gemini compatibility pass on a JSON schema.
+    """为 Gemini 模型副本补齐缺失的 array.items 提示，不改变宿主原始契约校验。
 
-    Gemini's GenerateContentRequest requires every array property to carry an
-    ``items`` field; OpenAI-style schemas omit it, and AstrBot plugins generate
-    schemas like ``{"type": "array"}`` (e.g. anysearch content_types), which the
-    Gemini backend rejects with INVALID_ARGUMENT for the WHOLE request. Fill a
-    string item schema only for the model; execution validates the independent
-    original host schema so this compatibility hint cannot narrow its contract.
+    Gemini 的 GenerateContentRequest 要求所有 array 属性（含 Optional/anyOf 联合分支）
+    必须携带 items 字段；执行端仍按独立的宿主原始 schema 校验，不收窄合法参数范围。
     """
-    if depth > 8 or not isinstance(schema, dict):
+    if depth > 32 or not isinstance(schema, dict):
         return schema
-    if schema.get("type") == "array" and not isinstance(schema.get("items"), dict):
+    schema_type = schema.get("type")
+    is_array = schema_type == "array" or (
+        isinstance(schema_type, list) and "array" in schema_type
+    )
+    if is_array and not isinstance(schema.get("items"), dict):
         schema["items"] = {"type": "string"}
     props = schema.get("properties")
     if isinstance(props, dict):
         for value in props.values():
             _sanitize_for_gemini(value, depth + 1)
-    items = schema.get("items")
-    if isinstance(items, dict):
-        _sanitize_for_gemini(items, depth + 1)
+    for key in ("items", "additionalProperties"):
+        child = schema.get(key)
+        if isinstance(child, dict):
+            _sanitize_for_gemini(child, depth + 1)
+    for key in ("anyOf", "oneOf", "allOf"):
+        children = schema.get(key)
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    _sanitize_for_gemini(child, depth + 1)
     return schema
 
 
@@ -618,7 +626,8 @@ class ToolBroker:
     async def _close(self):
         if self.server:
             self.server.close()
-            await self.server.wait_closed()
+        # Python 3.12+ 的 wait_closed() 会阻塞等待已建立的客户端连接退出；
+        # 必须先取消待处理调用与连接协程，再等待 server 完全关闭以避免死锁。
         for call in list(self.pending.values()):
             self.record_outcome(call)
             if not call.future.done():
@@ -627,6 +636,9 @@ class ToolBroker:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self.server:
+            await self.server.wait_closed()
         self.transport.token = ""
         if self.directory:
-            shutil.rmtree(self.directory, ignore_errors=True)
+            directory, self.directory = self.directory, None
+            await asyncio.to_thread(remove_tree_robust, directory)
