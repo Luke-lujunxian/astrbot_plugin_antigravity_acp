@@ -8,7 +8,8 @@
 - **PNG 压缩辅助块无损剥离与索引色兼容**：在校验块长度与 CRC32 后剥离 `zTXt` / `iCCP` / `iTXt` 辅助块再重组 PNG（既消除元数据解压放大风险，又兼容携带 Display P3 `iCCP` 或截图元数据的 macOS/iOS/Windows 截图）；新增 8 位调色板索引色 PNG（`color == 3` 及前置 `PLTE` 校验）支持。
 - **探测缓存、异步磁盘 I/O 与长历史二分裁剪**：`discover()` 并行采集 `--version` 与 `acp --help`，按二进制路径与文件 `stat` 缓存并记录 `supports_login` 供 `LoginFlow` 直接复用；异步路径中的 `make_home()` 与本地媒体读取 `_local()` 移入 `asyncio.to_thread`；`replay()` 与 `prompt_blocks()` 改用二分查找定位裁剪边界并预计算图片哈希，保持与逐条裁剪字节级等价。
 - **版本单点化、孤儿目录清扫与发布归档卫生**：新增零依赖 `agy_provider/_version.py` 统一供给 `main.py`、ACP `clientInfo`、MCP `serverInfo` 并由 `tests/test_release_hygiene.py` 与 `metadata.yaml` 强校验；插件初始化时后台清扫超过空闲阈值的非活跃 `preflight-*` / `login-*` / `runtime-*` 残留目录；补齐 `_conf_schema.json` 的 `enable_images` 与 `media_roots` 提示；新增 `.gitattributes` 在 `main.zip` / Release 归档中排除 `tests`、`docs`、`review-bundle`、`tools`、`.github` 等非运行文件；增强 `tools/check_sensitive.py`（支持 `--staged`、Google OAuth `ya29.` / `1//`、`gh[ousr]_` 及内嵌账密代理 URL 检测）。
-- **验证**：离线全量 Python 回归 267 项（Windows 本地 263 通过、4 按平台/权限跳过、0 失败），前端 `node --test` 19/19 通过，`compileall`、`check_sensitive.py`、`git diff --check` 通过；Ubuntu / Windows × Python 3.11 / 3.12 CI 矩阵全绿。本版未执行新增生产宿主实机冒烟。
+- **验证**：离线全量 Python 回归 267 项（Windows 本地 263 通过、4 按平台/权限跳过、0 失败），前端 `node --test` 19/19 通过，`compileall`、`check_sensitive.py`、`git diff --check` 通过；Ubuntu / Windows × Python 3.11 / 3.12 CI 矩阵全绿。
+- **生产实机验收（2026-11-18，小鱼 / shanghai，AstrBot 4.29.4 + Python 3.12.13 + AGY CLI 1.5.8）**：容器全量回归 267 项 OK（12 项平台跳过）；0.7.3 纯净包部署后插件零报错加载、host_compat 安装、`agy_acp(agy_probe)` 注册为默认 provider，部署文件与 tag 逐字节一致；webchat 端到端纯聊天经完整 pipeline 正常应答（22,957 prompt tokens，TTFT 40.5s，未触发 429、未回落 fallback）。工具轮实测遇上游 `gemini-3.8-flash-low` 连续 503 `No capacity available`，重试耗尽 180s `request_timeout` 后超时并回落 fallback；该轮无插件侧报错，未归因本版代码，工具链实机验收待上游容量正常时补测。
 
 ## 0.7.2（正式发布，2026-11-17）
 

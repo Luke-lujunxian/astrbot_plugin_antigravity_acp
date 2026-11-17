@@ -7,11 +7,11 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-blue)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29.4%2C%3C4.30-orange)
-![Stable](https://img.shields.io/badge/Stable-v0.7.2-brightgreen) ![Preview](https://img.shields.io/badge/Preview-v0.7.3-orange)
+![Status](https://img.shields.io/badge/Status-v0.7.3-brightgreen)
 
 通过 Google 官方 `agy` 客户端内置的 ACP（Agent Client Protocol）协议，把 Antigravity 模型安全、稳定地接入 AstrBot，作为日常对话主力。
 
-> **稳定版暂定 v0.7.2（2026-11-18）**：v0.7.3 已保留为 **Pre-release（待实机验收）**；其并发工具链、复杂 Schema、图片处理等改动已通过离线与 CI 测试，但还没有完成真实 AstrBot + AGY 工具调用和生产环境回归。一般安装请使用 [Latest 稳定 Release](https://github.com/sl251/astrbot_plugin_antigravity_acp/releases/latest)，需要协助测试 0.7.3 可前往 [预发布版本](https://github.com/sl251/astrbot_plugin_antigravity_acp/releases/tag/v0.7.3)。
+> 💡 **版本速递（v0.7.3，2026-11-18）**：修复 Python 3.12+ 工具桥关闭死锁与群聊/连发并发打断活跃工具轮的问题；补全 `Optional[list]` 等复杂工具数组参数兼容；无损剥离 PNG 辅助元数据块以兼容主流系统截图，并支持 8 位索引色 PNG；新增 CLI 探测缓存加速与发布归档瘦身。详细改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
@@ -71,7 +71,7 @@ agy acp --help
 > 注：插件不会自动下载二进制文件。Windows 用户请确保使用的是原生 `agy.exe`，不支持 `.cmd` 或 `.bat` 包装脚本。
 
 ### 第二步：安装本插件
-在 AstrBot WebUI 插件管理页上传 [最新稳定 Release 纯净包（当前 v0.7.2）](https://github.com/sl251/astrbot_plugin_antigravity_acp/releases/latest)。[主分支 ZIP 包](https://github.com/sl251/astrbot_plugin_antigravity_acp/archive/refs/heads/main.zip) 当前为 **v0.7.3 待验收版**，只建议主动参与测试时使用；也可以直接在 AstrBot 根目录下克隆主分支（同属待验收版）：
+在 AstrBot WebUI 插件管理页上传 [最新 Release 纯净包](https://github.com/sl251/astrbot_plugin_antigravity_acp/releases/latest) 或 [主分支 ZIP 包](https://github.com/sl251/astrbot_plugin_antigravity_acp/archive/refs/heads/main.zip)（已自动剔除测试与开发文件），也可以直接在 AstrBot 根目录下克隆：
 ```bash
 git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.git data/plugins/astrbot_plugin_antigravity_acp
 ```
@@ -123,7 +123,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 # 🤖 给 Agent 看的上下文
 
-先读 [AGENTS.md](AGENTS.md)。**最新稳定 Release 是 v0.7.2；当前主分支源码是 v0.7.3 待实机验收版**。本节描述主分支当前代码契约；仅支持 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**。历史实现和既有验收见 [CHANGELOG](CHANGELOG.md)。
+先读 [AGENTS.md](AGENTS.md)。当前发布基线为 **v0.7.3**；仅支持 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**。本节只保留当前有效契约，历史实现和既有验收见 [CHANGELOG](CHANGELOG.md)。
 
 | 当前契约 | 详细说明与证据入口 |
 | --- | --- |
