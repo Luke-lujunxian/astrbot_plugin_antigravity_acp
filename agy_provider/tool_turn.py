@@ -90,6 +90,7 @@ class ToolTurn:
         self.claimed_half_open = claimed_half_open
         self.queue = asyncio.Queue(maxsize=128)
         self.resume = asyncio.Event()
+        self.done_event = asyncio.Event()
         self.waiting = None
         self.segment = []
         self.finished = False
@@ -230,6 +231,7 @@ class ToolTurn:
                 self.watcher.cancel()
                 if self.runtime.turns.get(self.key) is self:
                     del self.runtime.turns[self.key]
+                self.done_event.set()
 
     async def _error(self, exc):
         # Discard stale queued tool handoffs, never dispatch after a terminal error.
@@ -344,6 +346,12 @@ async def chat_events(
     turn = runtime.turns.get(key)
     try:
         if turn:
+            if signal is None or signal is not turn.signal:
+                if request.messages and request.messages[-1].get("role") == "tool":
+                    raise AgyError(
+                        "TOOL_STALE", "原工具轮已结束或不属于当前调用，拒绝回填旧工具结果。"
+                    )
+                raise AgyError("BUSY", "当前会话存在进行中的工具轮，请稍后再试。")
             try:
                 turn.accept(request, model, effort, snapshot, signal, approver)
             except BaseException as exc:
@@ -351,7 +359,8 @@ async def chat_events(
                     code = exc.code if isinstance(exc, AgyError) else "TOOL_CONTEXT"
                     turn.meter.finish(status="error", error_code=code)
                 await turn.close()
-                runtime.turns.pop(key, None)
+                if runtime.turns.get(key) is turn:
+                    runtime.turns.pop(key, None)
                 raise
         else:
             if request.messages[-1]["role"] == "tool":

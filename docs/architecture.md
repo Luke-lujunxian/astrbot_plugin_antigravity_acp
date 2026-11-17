@@ -2,7 +2,7 @@
 
 适用于发布基线 **v0.7.2**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
 
-版本核对：metadata 与 [main.py](../main.py) 注册、[transport.py](../agy_provider/transport.py) clientInfo、[mcp_bridge.py](../agy_provider/mcp_bridge.py) serverInfo 已统一为 0.7.2（0.7.0 时期三处源码标签曾停留在 0.6.1，0.7.1 已修正，本版随发布同步）。排障仍需同时记录部署 SHA 与各字段，不能仅凭标签判断代码版本。
+版本核对：[metadata.yaml](../metadata.yaml) 与 [_version.py](../agy_provider/_version.py) 的 `PLUGIN_VERSION`（由 [main.py](../main.py) 注册、[transport.py](../agy_provider/transport.py) clientInfo、[mcp_bridge.py](../agy_provider/mcp_bridge.py) serverInfo 统一引用，并由 [test_release_hygiene.py](../tests/test_release_hygiene.py) 强校验一致）当前均为 0.7.2。排障仍需同时记录部署 SHA 与各字段，不能仅凭标签判断代码版本。
 
 ## 请求与工具数据流
 
@@ -33,7 +33,7 @@ flowchart LR
 | [system_prompt.py](../agy_provider/system_prompt.py) | `filter_host_capabilities()`，精确过滤失实宿主能力声明，独立定点改写已知 Safe Mode 单句，不修改用户历史 |
 | [sessions.py](../agy_provider/sessions.py) | `Runtime`、会话租约/复用/退休、串行化、生成终态和错误归因 |
 | [transport.py](../agy_provider/transport.py) | `AcpClient` 的 JSON-RPC、ACP 事件/usage、一次性权限、取消与有界输出 |
-| [process.py](../agy_provider/process.py)、[paths.py](../agy_provider/paths.py)、[windows_job.py](../agy_provider/windows_job.py) | CLI 发现/参数探测、隔离目录与 Windows 长路径、子进程树清理 |
+| [process.py](../agy_provider/process.py)、[paths.py](../agy_provider/paths.py)、[windows_job.py](../agy_provider/windows_job.py) | CLI 发现/参数并行探测与按文件元数据缓存、隔离目录与陈旧临时目录清扫、Windows 长路径与子进程树清理 |
 | [tools.py](../agy_provider/tools.py)、[tool_turn.py](../agy_provider/tool_turn.py) | 工具快照、原始/模型 schema、`ToolBroker` 校验与预算、`ToolTurn` 宿主交接与回填 |
 | [mcp_bridge.py](../agy_provider/mcp_bridge.py)、[bridge_transport.py](../agy_provider/bridge_transport.py) | MCP 子进程 relay、本地通道与 Windows 双向挑战认证 |
 | [errors.py](../agy_provider/errors.py)、[notices.py](../agy_provider/notices.py)、[failure_guard.py](../agy_provider/failure_guard.py) | 错误分类、跨分片 CLI 告警过滤/快速中断、EMPTY 去重与额度/限流冷却 |
@@ -45,7 +45,7 @@ flowchart LR
 
 ## 会话、历史与防重放
 
-- 稳定身份由 Provider 实例、AstrBot session、conversation 组成；缺少稳定身份不能冒用其他会话。工具请求还要求真实 ToolSet 和 `abort_signal` 生命周期。
+- 稳定身份由 Provider 实例、AstrBot session、conversation 组成；缺少稳定身份不能冒用其他会话。工具请求还要求真实 ToolSet 和 `abort_signal` 生命周期；当活跃 `ToolTurn` 等待原调用方回填工具结果时，同一会话的其他并发新请求在 `queue_timeout` 内排队等待而不中断原工具轮。
 - `sessions.compare_history()` 比较 `host_expected` 与新宿主历史；`sent_window` 单独记录实际发送窗口。`exact`、`host_trim`、`rewrite`、`append_gap`、`unknown` 是诊断关系，不能把相同尾部当作安全复用证明。
 - `session_reuse_mode=strict` 为默认；`structured` 仅在 `messages.normalize()` 验证 `agy_context_parts` 后，把可信 transient 放入用户轮。无效/缺失分段不能升级为可信数据。模型、档位、稳定 system、工具指纹或历史语义变化可触发重建。
 - [context_usage.py](../agy_provider/context_usage.py) 连续比较同一窗口的可信 `used/size`。默认峰值至少 64000、当前值严格低于峰值 50% 时标记疑似压缩；先完成本轮及工具回填，再退休。缺失/无效字段及窗口切换中断比较，不能据此证明上游压缩或计算账单。
@@ -66,7 +66,7 @@ flowchart LR
 
 放行后 `ToolBroker.dispatch()` 继续检查活跃轮、会话元数据、工具名称、参数、次数/并发/结果预算；`ToolTurn` 交给 AstrBot 审批和执行，按审计过的调用及参数匹配回填。不能因 ACP 已许可就跳过宿主约束。
 
-`ToolSnapshot.to_host_schema` 是独立深拷贝的宿主原始 schema；`tools[].inputSchema` 是 Gemini 适配 schema。缺失 array `items` 时模型端仍保守补 string，执行端按原始契约接受原本合法的数字/对象/空/嵌套数组；显式 string items 继续拒绝非字符串。两份 schema 都进入快照指纹；并不据此保证模型实际会生成所有合法值或 Gemini 支持空 items。
+`ToolSnapshot.to_host_schema` 是独立深拷贝的宿主原始 schema；`tools[].inputSchema` 是 Gemini 适配 schema。缺失 array `items`（含 `anyOf`/`oneOf`/`allOf`、`additionalProperties` 与联合类型列表中的数组）时模型端保守补 string，执行端仍按原始契约接受原本合法的数字/对象/空/嵌套数组；显式 string items 继续拒绝非字符串。两份 schema 都进入快照指纹；并不据此保证模型实际会生成所有合法值或 Gemini 支持空 items。
 
 ## system 过滤与 429 的证据边界
 
@@ -102,7 +102,7 @@ flowchart LR
 | 代理 | `proxy_mode=inherit`；支持 `custom/direct`，custom 仅注入 CLI 子进程；容器内 localhost 指容器 |
 | 工具 | `enable_tools=false`；还需宿主 `tool_use`、实际 ToolSet、身份/取消信号；`agy_tools_mode=inherit/chat/tools`，chat 无工具，tools 不能绕过总闸；`tool_choice` 仅 auto/none |
 | 工具预算 | 16 次、并发 1、审批 60 秒、执行 120 秒、结果总计 262144 字节；超限报错，不静默截断 |
-| 图片 | `enable_images=false`；还需宿主 image 与 CLI image 能力；PNG/JPEG 默认最多 8 张（可配 1–16），字节/像素有界，本地目录必须在 `media_roots`；音频/视频/PDF/生成图片未接入 |
+| 图片 | `enable_images=false`；还需宿主 image 与 CLI image 能力；PNG/JPEG 默认最多 8 张（可配 1–16），PNG 支持 8 位灰度/索引色/RGB/RGBA 并在校验 CRC 后剥离 `zTXt`/`iCCP`/`iTXt` 辅助块，字节/像素有界，本地目录必须在 `media_roots`；音频/视频/PDF/生成图片未接入 |
 | 思考档位 | 调用 `agy_thought_level` 优先于 Provider `custom_extra_body`；选出的 default 继承全局 `thought_level`，全局也 default 才用 CLI 默认；始终校验当前模型目录/选项，不硬编码模型 ID |
 | 历史/输出 | `history_bytes=160000`、`max_output_bytes=4194304`；不宣称原样发送无限历史，采样参数 temperature/top_p/max_tokens 无对应透传保证 |
 | 组件实验 | `agy_customizations_mode=inherit`；minimal 仅在已探测支持参数的工具默认 Agent 启用，真实 MCP/A-B 仍需另验；不自动下载安装/热替换 CLI |

@@ -1,0 +1,12 @@
+# GitHub 归档打包（main.zip / Release 源码包）排除开发、测试与历史审查目录及文件
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.github export-ignore
+/tests export-ignore
+/tools export-ignore
+/docs export-ignore
+/review-bundle export-ignore
+/AGENTS.md export-ignore
+/HANDOFF_0.4.0.md export-ignore
+/TEST_REPORT_0.4.0.md export-ignore
+/TEST_REPORT_0.4.1.md export-ignore

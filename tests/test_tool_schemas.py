@@ -118,6 +118,84 @@ class ToolSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(unconstrained.fingerprint, strings.fingerprint)
         self.assertEqual(unconstrained.fingerprint, same.fingerprint)
 
+    async def test_optional_union_combinators_and_deep_arrays_sanitized_without_narrowing(self):
+        # 覆盖 Pydantic Optional[list] (anyOf)、联合类型列表、additionalProperties 及 >8 层嵌套
+        deep = {"type": "array"}
+        for _ in range(10):
+            deep = {"type": "object", "properties": {"next": deep}}
+        schema = {
+            "type": "object",
+            "properties": {
+                "opt_any": {"anyOf": [{"type": "array"}, {"type": "null"}]},
+                "opt_one": {"oneOf": [{"type": "array"}, {"type": "string"}]},
+                "opt_all": {"allOf": [{"type": "array"}]},
+                "union_type": {"type": ["array", "null"]},
+                "dict_of_lists": {
+                    "type": "object",
+                    "additionalProperties": {"type": "array"},
+                },
+                "deep": deep,
+            },
+            "additionalProperties": False,
+        }
+        original = copy.deepcopy(schema)
+        tool = SimpleNamespace(
+            name="complex", active=True, description="complex", parameters=schema
+        )
+        snap = ToolSnapshot(SimpleNamespace(tools=[tool]))
+        self.assertEqual(snap.skipped, [])
+        wire_props = snap.tools[0]["inputSchema"]["properties"]
+        self.assertEqual(
+            wire_props["opt_any"]["anyOf"][0]["items"], {"type": "string"}
+        )
+        self.assertEqual(
+            wire_props["opt_one"]["oneOf"][0]["items"], {"type": "string"}
+        )
+        self.assertEqual(
+            wire_props["opt_all"]["allOf"][0]["items"], {"type": "string"}
+        )
+        self.assertEqual(wire_props["union_type"]["items"], {"type": "string"})
+        self.assertEqual(
+            wire_props["dict_of_lists"]["additionalProperties"]["items"],
+            {"type": "string"},
+        )
+        cursor = wire_props["deep"]
+        for _ in range(10):
+            cursor = cursor["properties"]["next"]
+        self.assertEqual(cursor["items"], {"type": "string"})
+        # 宿主原始契约保持独立，仍接受非字符串数组与 null
+        self.assertEqual(snap.to_host_schema["complex"], original)
+        broker = self.broker(snap)
+        req = {
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "complex",
+                "arguments": {
+                    "opt_any": [1, {"ok": True}],
+                    "opt_one": [42],
+                    "opt_all": [False],
+                    "union_type": None,
+                    "dict_of_lists": {"k": [1, 2]},
+                },
+                "_meta": {
+                    "antigravity.google/conversation_id": "schema-session",
+                    "antigravity.google/root_conversation_id": "schema-session",
+                },
+            },
+        }
+        task = asyncio.create_task(broker.dispatch(req))
+        try:
+            await asyncio.sleep(0)
+            call = broker.ready.get_nowait()
+            broker.handoff(call)
+            broker.resolve(call.id, "ok")
+            res = await asyncio.wait_for(task, 1)
+            self.assertFalse(res["isError"])
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
 
 if __name__ == "__main__":
     unittest.main()

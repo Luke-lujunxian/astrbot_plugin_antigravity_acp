@@ -23,7 +23,7 @@ from .messages import (
     prompt_blocks,
 )
 from .models import catalog, select
-from .paths import windows_long_path
+from .paths import remove_tree_robust, windows_long_path
 from .process import LaunchInfo, discover, launch_args, make_home
 from .telemetry import TelemetryTracker, TurnMeter
 from .tools import ToolBroker, ToolSnapshot
@@ -246,7 +246,7 @@ class Session:
         finally:
             self.client = None
             if self.home:
-                await asyncio.to_thread(shutil.rmtree, self.home, True)
+                await asyncio.to_thread(remove_tree_robust, self.home)
                 self.home = None
             self.host_expected.clear()
             self.sent_window = None
@@ -396,7 +396,8 @@ class Runtime:
         info = await self.launch_info()
         if self.stopped:
             raise AgyError("CLOSED", "插件已停用。")
-        session.home = make_home(
+        session.home = await asyncio.to_thread(
+            make_home,
             self.root,
             system,
             tools_mode=bool(snapshot and snapshot.tools),

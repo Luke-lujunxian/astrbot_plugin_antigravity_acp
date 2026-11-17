@@ -9,16 +9,19 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.provider import register as registry
 
+from .agy_provider._version import PLUGIN_VERSION
 from .agy_provider.config import Settings
 from .agy_provider.errors import AgyError
 from .agy_provider.host_compat import install_host_compat, uninstall_host_compat
 from .agy_provider.onboarding import Onboarding, ensure_provider_source, next_step
 from .agy_provider.monitoring import Monitoring
+from .agy_provider.paths import cleanup_stale_dirs, plugin_data_root
 from .agy_provider.provider import (
     DEFAULT_CONFIG,
     OWNER,
     PROVIDER_TYPE,
     AgyProvider,
+    active_instances,
     configure,
     instance_cost_snapshots,
     terminate_all,
@@ -44,7 +47,7 @@ def unregister_owned_adapter() -> None:
     "astrbot_plugin_antigravity_acp",
     "sl251",
     "通过本机 AGY ACP 使用 Gemini 模型",
-    "0.7.2",
+    PLUGIN_VERSION,
     "https://github.com/sl251/astrbot_plugin_antigravity_acp",
 )
 class AgyProviderPlugin(Star):
@@ -54,6 +57,7 @@ class AgyProviderPlugin(Star):
         self.registered = False
         self.doctor_lock = asyncio.Lock()
         self.doctor_task = None
+        self.cleanup_task = None
         self.stopping = False
         self.setup_service = None
         self.monitor_service = None
@@ -231,11 +235,21 @@ class AgyProviderPlugin(Star):
         self.setup_service.register()
         self.monitor_service = Monitoring(self.context)
         self.monitor_service.register()
+        active_names = {inst.runtime.root.name for inst in active_instances()}
+        data_root = plugin_data_root()
+        self.cleanup_task = asyncio.create_task(
+            asyncio.to_thread(cleanup_stale_dirs, data_root, active_names=active_names),
+            name="agy:stale-cleanup",
+        )
         if settings.setup_auto_check:
             self.setup_service.start_check()
 
     async def terminate(self):
         self.stopping = True
+        if self.cleanup_task:
+            self.cleanup_task.cancel()
+            await asyncio.gather(self.cleanup_task, return_exceptions=True)
+            self.cleanup_task = None
         if self.monitor_service:
             await self.monitor_service.close()
         if self.setup_service:

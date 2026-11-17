@@ -99,8 +99,11 @@ async def _run_probe(
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(prefix="preflight-", dir=root) as directory:
         stage("authentication")
-        home = make_home(
-            Path(directory), "Preflight only; no generation.", settings=settings
+        home = await asyncio.to_thread(
+            make_home,
+            Path(directory),
+            "Preflight only; no generation.",
+            settings=settings,
         )
         client = AcpClient(settings)
         try:
