@@ -1,5 +1,13 @@
 # 变更记录
 
+## 0.7.4（正式发布，2026-11-19）
+
+- **修复 #24：会话重建时历史图片被重复提取为当前轮附件**：`prompt_blocks()` 的 `build_window()` 此前未区分当前最新用户轮与历史轮，把窗口内所有历史用户消息的图片一并提取为当前 `session/prompt` 末尾的真实 ACP `image` 块附件——用户发过一次图后，后续纯文本轮只要触发会话重建（system 变化、空闲过期、进程重启等），旧图即随请求重发，造成视觉 token 浪费、模型误判当前轮收到新图（围绕旧图幻觉作答），无视觉能力 CLI 环境下纯文本轮还会误报 `IMAGE_CAPABILITY`。修复后以 `last_user_idx` 反向定位最新用户消息（无 user 消息时安全返回 `-1`），`enumerate(tail, start=cut_index)` 保持裁剪前原始下标对齐，仅当前轮图片作为附件发送并按出现顺序编号；历史图片在转录 JSON 中保留 `{"image_sha256": ..., "status": "historical"}` 占位（不带 `attachment` 键）；历史轮不写入 `image_ids`，跨轮显式重发同图仍正常附带。会话复用路径（仅发最后一条消息）不受影响。
+- **行为权衡与已知限制**：会话重建后模型不再看到历史图的原始像素，只能依赖历史文字描述与哈希占位——重建后需重看旧图细节请重新发送该图；`prepare_media()` 仍按原样预检历史图片并计入媒体预算（跳过会破坏 `request.hashes` 哈希契约、摧毁会话复用），长会话累计图片超限或旧图源失效仍可能在预检阶段报错，留待后续另案处理。
+- **测试**：新增 `tests/test_prompt_images.py` 8 项单元回归（历史图不重发、多轮多图、当前轮多图+历史混合、跨轮重发同图、轮内重复图去重、预算裁剪偏移对齐、工具交换历史、单消息捷径与无 user 防御）；`tests/test_sessions.py` 新增 3 项会话级集成场景（发图后纯文本重建不带旧图、发图后纯文本命中复用、无图能力 CLI 下纯文本重建不误报 `IMAGE_CAPABILITY`）；补强 `tests/test_release_hygiene.py` 弱断言（原断言保留，新增 budget=900 历史占位与 budget=1000 当前轮带图二分裁剪 subTest）；`tests/fake_cli.py` 新增 `no-image` 能力场景。
+- **验证**：全量离线回归 278 项（266 通过 / 0 失败 / 12 项平台跳过）；`node --test` 19/19；`compileall`、`git diff --check`、`check_sensitive.py` 通过；Ubuntu / Windows × Python 3.11 / 3.12 CI 矩阵全绿（PR [#25](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/25)）。
+- **生产实机验收（2026-11-19，小鱼 / shanghai，AstrBot 4.29.4 + AGY CLI 1.5.9，webchat JWT 端到端）**：分支构建预部署后，当前轮发图正常识图；`docker restart` 强制会话重建后的纯文本轮，模型明确回答「在你当前这条消息里，我看不到任何图片」，该轮输入 token 与含图轮差值恰为图片视觉开销（约 2.3K），证实旧图不再随请求重发；重发同一张图可正常识别（跨轮去重保护生效），无 fallback 切换、无 `AgyError`、无 429。验收同时观测到一项与本修复无关的既有行为：webchat 内存态历史图为本地路径且 `media_roots` 为空时，同进程次轮在 `prepare_media` 预检报 `IMAGE_PATH` 并回落 fallback（v0.7.3 同场景同样触发，QQ 平台图片为 http URL 不受影响）；如需 webchat 图片追问体验，可将宿主附件目录加入 `media_roots`。
+
 ## 0.7.3（正式发布，2026-11-18）
 
 - **修复 Python 3.12+ 工具桥关闭死锁与 Windows 目录释放竞态（PR #22）**：Python 3.12.1+ 中 `asyncio.Server.wait_closed()` 会等待所有活跃客户端连接协程退出后才返回；`ToolBroker._close()` 调整为先关闭监听、取消待处理调用 `future` 与连接任务并 `gather`，最后再 `await server.wait_closed()`，消除工具交接后取消或插件停用时阻塞至 `tool_execution_timeout`（默认 120s）的死锁。同时新增 `remove_tree_robust()` 有界重试并在 Windows 无 Job Object 且前端进程先退出时仍执行 `taskkill /T`，消除后代进程 `cwd` 句柄短暂延迟释放引发的 `WinError 32`。

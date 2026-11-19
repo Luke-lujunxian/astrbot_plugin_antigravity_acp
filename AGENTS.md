@@ -1,6 +1,6 @@
 # Agent 工作入口
 
-本仓库把官方 `agy acp`（stdio）接为 AstrBot 原生 `agy_acp` Provider。当前发布基线 **v0.7.3**，Python **3.11+**，AstrBot **`>=4.29.4,<4.30`**；版本以 [metadata.yaml](metadata.yaml) 为准。识别 4.30 的已知宿主提示文案，不代表兼容 4.30 的 runner/API。Hermes、Codex、AGY 从本页按任务读取资料，无需通读历史施工书。
+本仓库把官方 `agy acp`（stdio）接为 AstrBot 原生 `agy_acp` Provider。当前发布基线 **v0.7.4**，Python **3.11+**，AstrBot **`>=4.29.4,<4.30`**；版本以 [metadata.yaml](metadata.yaml) 为准。识别 4.30 的已知宿主提示文案，不代表兼容 4.30 的 runner/API。Hermes、Codex、AGY 从本页按任务读取资料，无需通读历史施工书。
 
 ## 必须保持的边界
 
@@ -26,7 +26,7 @@
 | 安装、配置与日常使用 | [README](README.md) | [配置 schema](_conf_schema.json)、[Settings](agy_provider/config.py) |
 | ACP、会话复用、工具交接、防重放 | [架构与源码导航](docs/architecture.md) | `provider.py` → `sessions.py` / `tool_turn.py` → `transport.py` |
 | 报错、启动、登录、工具、模型、监控 | [排障 SOP](docs/troubleshooting.md) | 按错误码找证据、源码及测试 |
-| #12 MCP 权限 / #13 数组 schema / #14 本地能力 429 / #19 Safe Mode 429 | [故障定位索引](docs/architecture.md#故障定位索引) | 源码与测试按症状直达，#19 先读 [429 排障](docs/troubleshooting.md#rate_limit--quota-与-14) |
+| #12 MCP 权限 / #13 数组 schema / #14 本地能力 429 / #19 Safe Mode 429 / #24 历史图片重复附件 | [故障定位索引](docs/architecture.md#故障定位索引) | 源码与测试按症状直达，#19 先读 [429 排障](docs/troubleshooting.md#rate_limit--quota-与-14) |
 | 最小复现、测试命令、实机验收与报告 | [测试与交付规范](docs/testing.md) | [CI 矩阵](.github/workflows/test.yml) |
 | 发布历史与既有验收证据 | [CHANGELOG](CHANGELOG.md) | 仅在追溯指定版本时读历史计划/报告 |
 

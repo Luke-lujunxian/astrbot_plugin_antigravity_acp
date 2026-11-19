@@ -111,6 +111,7 @@ flowchart LR
 
 | 故障或任务 | 入口源码/符号 | 对应测试 |
 | --- | --- | --- |
+| #24 历史图片被重复提取为当前附件 | [messages.py](../agy_provider/messages.py) `prompt_blocks` / `build_window` | [test_prompt_images.py](../tests/test_prompt_images.py)、[test_sessions.py](../tests/test_sessions.py) |
 | #12 合法 MCP permission 被取消 | [transport.py](../agy_provider/transport.py) `_mcp_permission_option`、[tool_turn.py](../agy_provider/tool_turn.py) | [test_mcp_permissions.py](../tests/test_mcp_permissions.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
 | #11 内置工具被拒后无正文 | [transport.py](../agy_provider/transport.py) `_reject_request`、[sessions.py](../agy_provider/sessions.py) `Runtime.stream` | [test_permission_attribution.py](../tests/test_permission_attribution.py) |
 | #13 数组参数被桥拒绝 | [tools.py](../agy_provider/tools.py) `ToolSnapshot` / `ToolBroker.dispatch` | [test_tool_schemas.py](../tests/test_tool_schemas.py) |
