@@ -1,8 +1,10 @@
 # 当前架构与源码导航
 
-适用于发布基线 **v0.7.3**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
+适用于发布基线 **v0.7.4**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
 
-版本核对：[metadata.yaml](../metadata.yaml) 与 [_version.py](../agy_provider/_version.py) 的 `PLUGIN_VERSION`（由 [main.py](../main.py) 注册、[transport.py](../agy_provider/transport.py) clientInfo、[mcp_bridge.py](../agy_provider/mcp_bridge.py) serverInfo 统一引用，并由 [test_release_hygiene.py](../tests/test_release_hygiene.py) 强校验一致）当前均为 0.7.3。排障仍需同时记录部署 SHA 与各字段，不能仅凭标签判断代码版本。
+版本核对：[metadata.yaml](../metadata.yaml) 与 [_version.py](../agy_provider/_version.py) 的 `PLUGIN_VERSION`（由 [main.py](../main.py) 注册、[transport.py](../agy_provider/transport.py) clientInfo、[mcp_bridge.py](../agy_provider/mcp_bridge.py) serverInfo 统一引用，并由 [test_release_hygiene.py](../tests/test_release_hygiene.py) 强校验一致）当前均为 0.7.4。排障仍需同时记录部署 SHA 与各字段，不能仅凭标签判断代码版本。
+
+当前维护中的宿主定点兼容及其退役条件见 [兼容补丁登记表](compatibility.md)；历史施工书与当前待办的区别见 [计划状态索引](plan-status.md)。
 
 ## 请求与工具数据流
 
@@ -102,7 +104,7 @@ flowchart LR
 | 代理 | `proxy_mode=inherit`；支持 `custom/direct`，custom 仅注入 CLI 子进程；容器内 localhost 指容器 |
 | 工具 | `enable_tools=false`；还需宿主 `tool_use`、实际 ToolSet、身份/取消信号；`agy_tools_mode=inherit/chat/tools`，chat 无工具，tools 不能绕过总闸；`tool_choice` 仅 auto/none |
 | 工具预算 | 16 次、并发 1、审批 60 秒、执行 120 秒、结果总计 262144 字节；超限报错，不静默截断 |
-| 图片 | `enable_images=false`；还需宿主 image 与 CLI image 能力；PNG/JPEG 默认最多 8 张（可配 1–16），PNG 支持 8 位灰度/索引色/RGB/RGBA 并在校验 CRC 后剥离 `zTXt`/`iCCP`/`iTXt` 辅助块，字节/像素有界，本地目录必须在 `media_roots`；音频/视频/PDF/生成图片未接入。会话重建时，仅最新用户消息中的图片作为附件发送，历史图片在转录中仅保留哈希和 `historical` 标记。 |
+| 图片 | `enable_images=false`；还需宿主 image 与 CLI image 能力；PNG/JPEG 默认最多 8 张（可配 1–16），PNG 支持 8 位灰度/索引色/RGB/RGBA 并在校验 CRC 后剥离 `zTXt`/`iCCP`/`iTXt` 辅助块，字节/像素有界，本地目录必须在 `media_roots`；音频/视频/PDF/生成图片未接入。会话重建时，仅最新用户消息中的图片作为附件发送，历史图片在转录中仅保留哈希和 `historical` 标记。**v0.7.4 的剩余限制**：`prepare_media()` 仍会预检历史图片、占用本轮图片总数及字节预算；旧源失效或长会话累计图片过多可能在生成前失败，详见 [排障 SOP](troubleshooting.md#工具图片与监控)。 |
 | 思考档位 | 调用 `agy_thought_level` 优先于 Provider `custom_extra_body`；选出的 default 继承全局 `thought_level`，全局也 default 才用 CLI 默认；始终校验当前模型目录/选项，不硬编码模型 ID |
 | 历史/输出 | `history_bytes=160000`、`max_output_bytes=4194304`；不宣称原样发送无限历史，采样参数 temperature/top_p/max_tokens 无对应透传保证 |
 | 组件实验 | `agy_customizations_mode=inherit`；minimal 仅在已探测支持参数的工具默认 Agent 启用，真实 MCP/A-B 仍需另验；不自动下载安装/热替换 CLI |
