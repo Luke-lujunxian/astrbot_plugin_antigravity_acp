@@ -113,7 +113,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 *(完整历史见 [`CHANGELOG.md`](./CHANGELOG.md))*
 
-- **v0.7.4**：修复会话重建时历史窗口图片被重复提取为当前轮附件（#24）——仅当前最新用户消息的图片随请求附带，历史图在转录中保留哈希占位；跨轮重发同图不被误去重，预算裁剪不丢当前轮图片；新增 8 项单元回归与 3 项会话级集成测试（[#25](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/25)）。
+- **v0.7.4**：修复会话重建时历史窗口图片被重复提取为当前轮附件（#24）——仅当前最新用户消息的图片随请求附带，历史图在转录中保留哈希占位；跨轮重发同图不被误去重，预算裁剪不丢当前轮图片；**仍会预检历史图片（旧图源失效或累计预算可能报错）**；新增 8 项单元回归与 3 项会话级集成测试（[#25](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/25)）。
 - **v0.7.3**：修复 Python 3.12+ 工具桥关闭死锁与同会话并发请求误杀活跃工具轮；补全 `anyOf`/联合类型数组 schema 适配；无损剥离 PNG 压缩辅助块并支持 8 位索引色；CLI 探测缓存、长历史二分裁剪与 ZIP 归档瘦身（[#22](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/22)）。
 - **v0.7.2**：定点兼容 AstrBot 4.29.4 Safe Mode 第 4 条规则触发的上游伪 429（`style/role-play` 等义改写，fail-open，不改冷却语义）。
 - **v0.7.1**：429 结构化标签过滤扩展至 AstrBot 4.30 已知声明，新增内容相关 429 候选遥测（`content_429_candidate`，不改冷却语义）；WebUI 监控三层重构与纯 SVG 可视化。
@@ -135,6 +135,8 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 | system 仅过滤已知宿主能力声明并定点兼容改写已知 Safe Mode 单句；4.30 文案处理不是 4.30 宿主兼容证明；`content_429_candidate` 是候选遥测，不是上游根因 | [过滤与 429 边界](docs/architecture.md#system-过滤与-429-的证据边界)，[#14 / #19 排障](docs/troubleshooting.md#rate_limit--quota-与-14) |
 | 检测/保存不等于真实生成；用量缺失保留未知；监控只读现有脱敏快照，不发模型请求 | [排障 SOP](docs/troubleshooting.md)，[实机验收分层](docs/testing.md#实机验收) |
 | 工具/图片默认关闭，要求插件与宿主双开关；PNG 校验 CRC 后剥离压缩辅助块并支持 8 位索引色；不支持音频、视频、PDF 或图片生成；会话重建时仅附带当前最新用户消息中的图片，历史图保留哈希占位 | [关键配置](docs/architecture.md#关键配置)、[配置 schema](_conf_schema.json) |
+
+当前宿主定点兼容与退役条件见 [兼容补丁登记](docs/compatibility.md)，过期施工书与剩余事项见 [计划状态索引](docs/plan-status.md)。
 
 开发时按 [测试与交付规范](docs/testing.md) 记录通过/失败/跳过、环境与实机边界。定位错误直接用 [故障 → 源码 → 测试索引](docs/architecture.md#故障定位索引)，无需先读旧施工书。
 

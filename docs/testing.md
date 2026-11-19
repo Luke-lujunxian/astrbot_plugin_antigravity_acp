@@ -1,6 +1,6 @@
 # 测试、验收与交付规范
 
-适用基线 **v0.7.3**，Python **3.11+**、AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。数量由本次运行得出，不把旧版本测试总数当作当前结果。
+适用基线 **v0.7.4**，Python **3.11+**、AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。数量由本次运行得出，不把旧版本测试总数当作当前结果。
 
 ## 开发流程
 
@@ -47,6 +47,12 @@ node --test tests/setup.test.mjs
 
 对于单项故障，可在已定位测试类后继续指定单个方法；不要假定测试文件名与旧分支相同。源路径映射见 [故障定位索引](architecture.md#故障定位索引)。
 
+图片回归（#24 仅验证重建附件边界；不代表历史媒体预检已消除）：
+
+```sh
+python -m unittest tests.test_prompt_images tests.test_media tests.test_sessions -v
+```
+
 ## 全量离线回归
 
 ```sh
@@ -66,7 +72,7 @@ git diff --check
 - 渲染 README 的 HTML/details、表格和 Mermaid；检查新文档的标题层级、配对代码围栏及列表，不把代码块里的伪链接当作正文链接。
 - 逐一验证修改文档中的相对文件/目录链接及本地标题锚点；有空格的真实路径须正确编码或用合适的 Markdown 链接。远程链接的可达性如未验证，单列限制。
 - 对照 `metadata.yaml`、main 注册、ACP clientInfo、MCP serverInfo 和 CHANGELOG 的当前版本；文档专项保持与当前发布基线一致；版本升级由维护者统一发布。
-- 当前基线 metadata 与 main 注册、ACP clientInfo、MCP serverInfo 均经 `agy_provider/_version.py` 统一为 0.7.3（由 `tests/test_release_hygiene.py` 强校验一致）。
+- 当前基线 metadata 与 main 注册、ACP clientInfo、MCP serverInfo 均经 `agy_provider/_version.py` 统一为 0.7.4（由 `tests/test_release_hygiene.py` 强校验一致）。
 - 扫描“本版/下一版/待验收/未发布”等易过时词语。历史文件保留原始证据，但在入口标注时间和后续状态；不要把历史计划中的未实现项改成当前已交付。
 - 对 #12、#13、#14、#19 走一遍文档导航，确认无需先读旧施工书就能找到源码、测试和保守结论。特别核验：一次性许可不绕过宿主、原始 schema 不被收窄、Safe Mode 仅定点改写、429 候选不是根因、已有输出不重放。
 

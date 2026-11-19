@@ -28,6 +28,8 @@
 | 报错、启动、登录、工具、模型、监控 | [排障 SOP](docs/troubleshooting.md) | 按错误码找证据、源码及测试 |
 | #12 MCP 权限 / #13 数组 schema / #14 本地能力 429 / #19 Safe Mode 429 / #24 历史图片重复附件 | [故障定位索引](docs/architecture.md#故障定位索引) | 源码与测试按症状直达，#19 先读 [429 排障](docs/troubleshooting.md#rate_limit--quota-与-14) |
 | 最小复现、测试命令、实机验收与报告 | [测试与交付规范](docs/testing.md) | [CI 矩阵](.github/workflows/test.yml) |
+| 当前兼容补丁、退役评估 | [兼容补丁登记](docs/compatibility.md) | 宿主定点过滤、fallback 防重放、Schema/工具协议边界 |
+| 过期施工书与遗留事项 | [计划状态索引](docs/plan-status.md) | 区分已完成、历史记录与待验证项 |
 | 发布历史与既有验收证据 | [CHANGELOG](CHANGELOG.md) | 仅在追溯指定版本时读历史计划/报告 |
 
 常用全量离线命令（仓库根目录，Python 3.11+、Node.js；CI 使用 Node 22）：

@@ -1,6 +1,6 @@
 # Agent 排障 SOP
 
-适用基线 **v0.7.3 / AstrBot `>=4.29.4,<4.30`**。安全边界见 [AGENTS.md](../AGENTS.md)，源码/测试映射见 [故障定位索引](architecture.md#故障定位索引)。以下流程不要求读取任何凭据或完整人格内容。
+适用基线 **v0.7.4 / AstrBot `>=4.29.4,<4.30`**。安全边界见 [AGENTS.md](../AGENTS.md)，源码/测试映射见 [故障定位索引](architecture.md#故障定位索引)。以下流程不要求读取任何凭据或完整人格内容。
 
 ## 先确定失败阶段
 
@@ -44,6 +44,8 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 | `IMAGE*` / `BACKPRESSURE` / `OUTPUT_LIMIT` | 图片格式/SSRF/目录/预算、宿主是否已过滤图片、消费者速度/输出上限 | 安全预算错误不是登录失败；不放宽目录/IP 边界或静默截断 |
 
 显式 RPC 认证/协议错误不被泛化 stderr 覆盖；背景 stderr 也不能否定已完成的成功调用。CLI 告警过滤为有界启发式，不能宣称对自然语言零误判。对应代码与定向测试均在 [索引](architecture.md#故障定位索引)。
+
+已知的宿主定点兼容及退役检查清单见 [兼容补丁登记](compatibility.md)；不要仅因某个 Issue 已关闭就删除兼容分支。
 
 ## RATE_LIMIT / QUOTA 与 #14
 
@@ -103,6 +105,7 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 
 - 工具/图片要同时开启插件总闸和宿主对应 modalities，修改插件设置后重载。工具还要有真实 ToolSet、稳定身份和取消信号；`tool_choice=required` 或指定函数不受支持。chat 模式不会注入工具。
 - 图片还需 CLI image 能力；默认 8 张是可配置值而非固定硬上限。校验 PNG/JPEG 的真实编码，限制像素/字节，下载遵守 DNS/IP/重定向 SSRF 边界，本地路径限定 `media_roots`。宿主提前过滤的图片无法由 Provider 恢复。
+- **v0.7.4 图片修复的边界（#24）**：会话重建时，`prompt_blocks()` 仅附带当前用户轮的图片，旧图改为哈希占位；但 `prepare_media()` 仍对历史消息中的图片源逐一读取、验证并计入图片数量/字节限制。旧图失效或长历史累积过多可能在发给 AGY 之前报 `IMAGE*`/预算错误；这不是已修复的重复发送，也不能靠调高预算或放宽 SSRF/本地目录边界作为通用修复。优先收集脱敏的消息数、历史图片数、源类型、具体错误码，见 [计划状态索引](plan-status.md#待处理与待验证)。
 - `/agy cost` 和 `monitor/status` 只读本地样本。实时池、近 24 小时、最近上下文采样是不同口径；未知 usage/占用不能显示成 0 或余额。重启后无历史不代表从未消耗。
 - monitor 返回 401/403 时核对 Dashboard 配置管理员；API Key 被该 endpoint 明确拒绝，不关闭鉴权。不要把聊天管理员权限当作 Dashboard 身份。
 - WebUI 使用原生 iframe bridge、当前 nonce 与轮询终态；旧响应、登录归属、复制失败、窄屏/主题等按 [实机验收](testing.md#实机验收) 单独检查。
