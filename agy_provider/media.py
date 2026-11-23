@@ -467,7 +467,7 @@ class _Images:
         self.sources[key] = block
         return block
 
-    async def parts(self, value, *, allow_images=True):
+    async def parts(self, value, *, allow_images=True, drop_images=False):
         if not isinstance(value, list):
             return value
         result, seen = [], set()
@@ -480,6 +480,9 @@ class _Images:
                 raise _error(
                     "UNSUPPORTED", "仅支持用户图片输入，不支持工具或其他角色的图片。"
                 )
+            if kind in {"image", "image_url"} and drop_images:
+                result.append({"type": "text", "text": "[图片]"})
+                continue
             if kind == "image_url":
                 item = part.get("image_url")
                 source = item.get("url") if isinstance(item, dict) else None
@@ -523,14 +526,26 @@ async def prepare_media(contexts, prompt, extra_parts, image_urls, settings):
     assembled text parts. Repeated images within a turn are sent once.
     """
     images = _Images(settings)
+    raw_contexts = list(contexts or [])
+    active_user_idx = -1
+    if prompt is None:
+        for i in range(len(raw_contexts) - 1, -1, -1):
+            raw = raw_contexts[i]
+            msg = raw.model_dump() if hasattr(raw, "model_dump") else raw
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                active_user_idx = i
+                break
     normalized = []
-    for raw in contexts or []:
+    for idx, raw in enumerate(raw_contexts):
         message = raw.model_dump() if hasattr(raw, "model_dump") else raw
         if not isinstance(message, dict):
             raise _error("INPUT", "消息必须为对象。")
         message = dict(message)
+        role = message.get("role")
         message["content"] = await images.parts(
-            message.get("content"), allow_images=message.get("role") == "user"
+            message.get("content"),
+            allow_images=role == "user",
+            drop_images=(role == "user" and idx != active_user_idx),
         )
         normalized.append(message)
     extras = await images.parts(extra_parts or [])

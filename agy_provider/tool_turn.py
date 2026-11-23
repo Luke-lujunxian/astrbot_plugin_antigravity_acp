@@ -27,11 +27,24 @@ def _continuation_exchange(messages, baseline, call, text):
         if message.get("role") == "tool" and message.get("tool_call_id") == call.id:
             results_at.append(index)
     if (
-        calls_at != [len(messages) - 2]
-        or results_at != [len(messages) - 1]
-        or messages[-2]
-        != {"role": "assistant", "content": text, "tool_calls": expected}
+        calls_at == [len(messages) - 2]
+        and results_at == [len(messages) - 1]
+        and messages[-2]
+        == {"role": "assistant", "content": text, "tool_calls": expected}
     ):
+        tail_len = 2
+    elif (
+        len(messages) >= 3
+        and messages[-1].get("role") == "user"
+        and calls_at == [len(messages) - 3]
+        and results_at == [len(messages) - 2]
+        and messages[-3]
+        == {"role": "assistant", "content": text, "tool_calls": expected}
+    ):
+        # ToolLoopAgentRunner appends a synthetic user message with cached tool
+        # images right after the tool result message.
+        tail_len = 3
+    else:
         raise AgyError(
             "TOOL_HISTORY", "工具续轮缺少唯一、完整且匹配的已审计调用/结果。"
         )
@@ -46,7 +59,7 @@ def _continuation_exchange(messages, baseline, call, text):
         for message in baseline
         if message["role"] == "tool"
     }
-    for message in messages[:-2]:
+    for message in messages[:-tail_len]:
         if any(
             item != known_calls.get(item["id"])
             for item in message.get("tool_calls", [])
@@ -55,7 +68,7 @@ def _continuation_exchange(messages, baseline, call, text):
             and message != known_results.get(message.get("tool_call_id"))
         ):
             raise AgyError("TOOL_HISTORY", "工具续轮混入了未审计或被改写的工具记录。")
-    return messages[-2:]
+    return messages[-tail_len:]
 
 
 class ToolTurn:
