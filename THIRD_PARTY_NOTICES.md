@@ -32,6 +32,29 @@ and AstrBot v4.29.4 at
 These are linked references only; their source, schemas, binaries and account data
 are not vendored. No new runtime dependency is introduced.
 
+## Native Dashboard UI refactor (#30) design baseline & frontend packages
+
+The `frontend/` source tree (compiled into static assets under `views/setup/` at
+build time; end users do not need Node.js) aligns its visual tokens, typography,
+spacing, and Plugin Views Bridge integration with AstrBot v4.29.4 at
+[`61335414433db721b3f7ecc93f90deafe0a59d78`](https://github.com/AstrBotDevs/AstrBot/tree/61335414433db721b3f7ecc93f90deafe0a59d78)
+(`dashboard/package.json`, `dashboard/src/plugins/vuetify.ts`,
+`dashboard/src/theme/{LightTheme,DarkTheme}.ts`, `dashboard/src/scss/*`,
+`astrbot/dashboard/plugin_page_bridge.js`, and
+`dashboard/src/views/PluginViewPage.vue`). Theme palettes and CSS rules in
+`frontend/src/plugins/vuetify.ts` and `frontend/src/styles/astrbot-theme.css`
+were independently written for this MIT-licensed repository; no AstrBot AGPL
+dashboard source files are vendored.
+
+Frontend packages declared in `frontend/package.json` (installed and bundled into
+`views/setup/` during build):
+
+- `vue` (`3.3.4`): MIT License — Vue.js runtime compiled into `views/setup/assets/`.
+- `vuetify` (`3.7.11`): MIT License — UI component library tree-shaken into `views/setup/assets/`.
+- `@mdi/js` (`^7.4.47`): Apache-2.0 License (JS wrapper) / Pictogrammers Free License (Material Design Icons SVG paths) — tree-shaken minimal SVG path subset only; full icon fonts are not bundled.
+- `@fontsource/outfit` (`^5.0.0`): MIT License (packaging) & SIL Open Font License 1.1 (Outfit font weights 400/500/600/700 bundled locally as static woff2 assets; no CDN requests). CJK glyphs use local system font fallbacks.
+- Build-time devDependencies (`vite` 6.4.1, `@vitejs/plugin-vue` 5.2.4, `vite-plugin-vuetify` 2.1.3, `typescript` 5.1.6, `vue-tsc` 1.8.8, `@types/node` ^20.5.7): MIT / Apache-2.0 Licenses; excluded from plugin release archives via `.gitattributes`.
+
 The DSH reference project's copyright and MIT license are retained below for the
 adapted configuration and protocol patterns:
 

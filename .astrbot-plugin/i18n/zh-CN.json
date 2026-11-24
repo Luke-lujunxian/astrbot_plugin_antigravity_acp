@@ -2,7 +2,7 @@
   "views": {
     "setup": {
       "title": "Antigravity ACP",
-      "description": "Google Antigravity CLI 状态检测、账号登录与 Gemini 模型配置面板。"
+      "description": "Google Antigravity CLI 概览、首次设置、模型路由管理、运行监控与脱敏诊断面板。"
     }
   }
 }
