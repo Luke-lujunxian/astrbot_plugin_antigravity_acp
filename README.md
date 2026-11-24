@@ -7,11 +7,11 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-blue)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29.4%2C%3C4.30-orange)
-![Status](https://img.shields.io/badge/Status-v0.8.0-brightgreen)
+![Status](https://img.shields.io/badge/Status-v0.8.1-brightgreen)
 
 通过 Google 官方 `agy` 客户端内置的 ACP（Agent Client Protocol）协议，把 Antigravity 模型安全、稳定地接入 AstrBot，作为日常对话主力。
 
-> 💡 **版本速递（v0.8.0，2026-11-24）**：原生 Dashboard 六模块重构（Vue 3 / Vuetify 3 / TypeScript），修复默认模型路由回读、历史图片预算、当前输入组织及安全 fallback 边界，新增脱敏持久失败诊断。离线 CI 已验证 PR #34；真实宿主、CLI 与视觉验收仍待 [#31](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/31)。详细改动见 [CHANGELOG.md](CHANGELOG.md)。
+> 💡 **版本速递（v0.8.1，2026-11-24）**：采用 feat/ui-redesign 可视化界面（原生 HTML / JS / CSS），保留环形统计、会话池占用条、上下文进度、Token 堆叠、耗时柱图、设置进度与响应式布局。兼容 v0.8.0 监控 v2、路由与失败诊断；后端修复全部保留，实机待 #31。
 
 ---
 
@@ -55,7 +55,7 @@
 
 - **官方通道直连**：原生 stdio 管道通信，享受 Google 官方客户端的稳定连接与低风控保障（这不构成账号安全或上游可用性的绝对保证）。
 - **双模能力支持**：支持多模态识图（Vision）以及内置 MCP 桥接工具调用（Tool Use），可无缝调用 AstrBot 的各种技能插件。
-- **原生 Dashboard**：在 AstrBot 插件详情 →「首次设置」打开，覆盖概览、设置向导、账号与环境、模型、监控及高级诊断六个模块。支持默认模型配置与实际路由回读，监控使用只读脱敏快照，不额外消耗模型额度。
+- **可视化运行监控与设置面板**：四步设置、会话池分段条、环形统计、Token 堆叠与延迟图，支持主题切换及原生 Bridge；路由和失败诊断为只读展示，不额外消耗模型额度。
 - **智能防雪崩**：具备 429 限流快速熔断、错误提前中断与疑似压缩后的上下文退役机制，避免异常重试浪费资源。
 
 ---
@@ -113,6 +113,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 *(完整历史见 [`CHANGELOG.md`](./CHANGELOG.md))*
 
+- **v0.8.1**：替换为 feat/ui-redesign 原生可视化前端，兼容监控 v2 与复制降级，保留 v0.8.0 后端（实机待 #31）。
 - **v0.8.0**：原生 Dashboard 重构、默认模型路由核对、当前用户输入与历史分离、历史图片预算修复、无正文且未交接工具时的安全 fallback、持久失败诊断（[#34](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/34)；实机待 #31）。
 - **v0.7.5**：修复设置面板复制按钮在 sandbox iframe + 非 HTTPS 下全部失效（#28）——三级降级复制、按钮就地反馈、授权链接「在新标签打开」；轮询差量渲染与 5/10/20/30s 退避、bfcache 恢复、监控重建签名跳过、浅色对比度达 AA、三态主题持久化等 21 项 UI 修正（[#29](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/29)）。
 - **v0.7.4**：修复会话重建时历史窗口图片被重复提取为当前轮附件（#24）——仅当前最新用户消息的图片随请求附带，历史图在转录中保留哈希占位；跨轮重发同图不被误去重，预算裁剪不丢当前轮图片；当时仍会预检历史图片（该限制在 v0.8.0 修复）；新增 8 项单元回归与 3 项会话级集成测试（[#25](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/25)）。
@@ -126,7 +127,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 # 🤖 给 Agent 看的上下文
 
-先读 [AGENTS.md](AGENTS.md)。当前版本基线为 **v0.8.0**；仅支持 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**。本节只保留当前有效契约，历史实现和既有验收见 [CHANGELOG](CHANGELOG.md)。
+先读 [AGENTS.md](AGENTS.md)。当前版本基线为 **v0.8.1**；仅支持 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**。本节只保留当前有效契约，历史实现和既有验收见 [CHANGELOG](CHANGELOG.md)。
 
 | 当前契约 | 详细说明与证据入口 |
 | --- | --- |

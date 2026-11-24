@@ -1,6 +1,6 @@
 # 当前架构与源码导航
 
-适用于版本基线 **v0.8.0**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
+适用于版本基线 **v0.8.1**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
 
 版本核对：[metadata.yaml](../metadata.yaml) 与 [_version.py](../agy_provider/_version.py) 的 `PLUGIN_VERSION`（由 [main.py](../main.py) 注册、[transport.py](../agy_provider/transport.py) clientInfo、[mcp_bridge.py](../agy_provider/mcp_bridge.py) serverInfo 统一引用，并由 [test_release_hygiene.py](../tests/test_release_hygiene.py) 强校验一致），以这两个文件为准；本文不重复写死具体版本号。排障仍需同时记录部署 SHA 与各字段，不能仅凭标签判断代码版本。
 
@@ -92,9 +92,9 @@ flowchart LR
 - 每实例内存保留最近 24 小时最多 100 轮，重启清空；持久 `agy.turn` 日志默认关闭（`cost_log_enabled=false`）。原始会话身份不暴露，监控对嵌套字段做白名单投影。
 - 文件桥只校验官方认证源的元数据，链接单个 `agy/antigravity-oauth-token`，不读取/复制内容。源缺失可尝试原生认证后端；不安全的现有文件为 `AUTH_BRIDGE`，不能靠忽略校验修复。
 - [login.py](../agy_provider/login.py) 把单行 code 交给官方 `agy acp --login` stdin；不解析完整 localhost 回调 URL。登录进程退出 0 后仍要通过 ACP/目录复检。URL/ticket 仅返回发起者，不落盘、不写业务日志。
-- [frontend/src/](../frontend/src/)（构建产物 [views/setup/](../views/setup/)） 使用宿主注入的 `window.AstrBotPluginView`：先 `ready()`，再调用相对 `setup/status` 等 endpoint；不访问父页面 DOM、Dashboard token 或 LocalStorage。设置 POST 使用当前 nonce，后台动作须轮询终态；模型已保存但全局默认切换失败应显示部分成功。
+- [views/setup/app.js](../views/setup/app.js)（原生 HTML/CSS/JS） 使用宿主注入的 `window.AstrBotPluginView`：先 `ready()`，再调用相对 `setup/status` 等 endpoint；不访问父页面 DOM、Dashboard token；本地存储仅用于非敏感主题偏好。设置 POST 使用当前 nonce，后台动作须轮询终态；模型已保存但全局默认切换失败应显示部分成功。
 - `GET monitor/status` 只收集现有实例快照，不启动 Runtime/CLI；仅配置中的 Dashboard 管理员可读，匿名 401，API Key/其他身份 403，停用 503，响应 `Cache-Control: no-store`。聊天管理员与 Dashboard 身份不是同一鉴权入口。
-- 旧 DOM/bridge 测试仅适用于已移除的 app.js；新版前端离线检查覆盖类型、构建与产物一致性，真实 iframe、主题、布局、剪贴板与 HTTP 鉴权需要另验。不要用静态页面预览替代宿主验收。
+- 原生 DOM/bridge 测试覆盖交互与监控 schema v2；前端直接分发，无需构建，真实 iframe、主题、布局、剪贴板与 HTTP 鉴权需要另验。不要用静态页面预览替代宿主验收。
 - 宿主把视图放进 `sandbox="allow-scripts allow-forms allow-downloads"` 的 iframe，且多数部署是 `http://<ip>`（非安全上下文）：`navigator.clipboard` 常为 `undefined`、`window.open` 可能被拦截。复制必须按「Clipboard API → 手势内同步 `execCommand` → 选中文本」降级，且轮询渲染不得重写未变化的 `input.value`（会折叠用户选区）。以上是宿主约束，不是插件缺陷，改动视图时保持不变式。
 
 ## 关键配置
@@ -129,7 +129,7 @@ flowchart LR
 | 登录、自检、模型保存 | [auth.py](../agy_provider/auth.py)、[login.py](../agy_provider/login.py)、[probe.py](../agy_provider/probe.py)、[onboarding.py](../agy_provider/onboarding.py) | [test_auth_config.py](../tests/test_auth_config.py)、[test_login.py](../tests/test_login.py)、[test_diagnostics.py](../tests/test_diagnostics.py)、[test_onboarding.py](../tests/test_onboarding.py) |
 | 工具桥认证、畸形/过期调用 | [bridge_transport.py](../agy_provider/bridge_transport.py)、[tools.py](../agy_provider/tools.py) | [test_bridge_hardening.py](../tests/test_bridge_hardening.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
 | 用量未知、上下文、监控权限/隐私 | [telemetry.py](../agy_provider/telemetry.py)、[monitoring.py](../agy_provider/monitoring.py) | [test_telemetry.py](../tests/test_telemetry.py)、[test_monitoring.py](../tests/test_monitoring.py) |
-| 设置页/主题/后台状态 | [views/setup/](../views/setup/)、[onboarding.py](../agy_provider/onboarding.py) | [前端构建校验](../frontend/scripts/verify-dist.mjs)、[test_onboarding.py](../tests/test_onboarding.py)；实机 #31 |
+| 设置页/主题/后台状态 | [views/setup/](../views/setup/)、[onboarding.py](../agy_provider/onboarding.py) | [setup.test.mjs](../tests/setup.test.mjs)、[test_onboarding.py](../tests/test_onboarding.py)；实机 #31 |
 | 图片被拒或未传入 | [media.py](../agy_provider/media.py) | [test_media.py](../tests/test_media.py) |
 
 按本表找文件后，用 `rg -n '符号或错误码' agy_provider tests` 定位；行号随提交变化，不以历史 issue 的旧行号替代当前源码。

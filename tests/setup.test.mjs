@@ -1,15 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {existsSync, readFileSync} from "node:fs";
+import {readFileSync} from "node:fs";
 import vm from "node:vm";
-
-// Legacy app.js UI was replaced by the Vite build (views/setup/assets/*.js) in #30.
-// Its 29 vm-based interaction regressions are superseded by frontend typecheck +
-// build:ci + verify:dist in CI; keeping this suite around would only fail on the
-// removed source file. Skip when the legacy bundle no longer exists.
-if (!existsSync(new URL("../views/setup/app.js", import.meta.url))) {
-  process.exit(0);
-}
 
 const source = readFileSync(new URL("../views/setup/app.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../views/setup/index.html", import.meta.url), "utf8");
@@ -44,19 +36,8 @@ class Element {
     if (this.tag === "select") this.value = children[0]?.value || "";
   }
   append(...children) {this.children.push(...children);}
-  appendChild(child) {
-    child.parentNode = this;
-    this.children.push(child);
-    return child;
-  }
-  removeChild(child) {
-    const index = this.children.indexOf(child);
-    assert.notEqual(index, -1);
-    this.children.splice(index, 1);
-    child.parentNode = null;
-    return child;
-  }
-  remove() {this.parentNode?.removeChild(this);}
+  appendChild(child) {child.parent = this; this.children.push(child); return child;}
+  remove() {if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);}
   setAttribute(name, value) {
     this.attributes[name] = String(value);
     if (name === "class") {
@@ -70,28 +51,18 @@ class Element {
   select() {this.selected = true;}
 }
 
-async function boot(initial = base(), {storage, getContext} = {}) {
+async function boot(initial = base()) {
   const elements = new Map([...html.matchAll(/<([\w-]+)[^>]*\bid="([^"]+)"/g)]
     .map(([, tag, id]) => [id, new Element(tag)]));
   const handlers = {};
   const requests = [];
-  const timers = new Map();
-  let nextTimer = 0;
   const bridge = {
-    ready: async () => ({}), getContext,
-    apiGet: async endpoint => endpoint === "monitor/status" ? monitorPayload(null) : initial,
+    ready: async () => ({}), apiGet: async () => initial,
     apiPost: async (endpoint, body) => {requests.push({endpoint, body}); return initial;},
   };
   const context = vm.createContext({
-    window: {
-      AstrBotPluginView: bridge, addEventListener: (name, cb) => {handlers[name] = cb;},
-      get localStorage() {
-        if (!storage) throw new Error("sandbox storage unavailable");
-        return storage;
-      },
-    },
-    document: {body: new Element("body"), execCommand: () => false,
-      documentElement: new Element("html"), getElementById: id => {
+    window: {AstrBotPluginView: bridge, addEventListener: (name, cb) => {handlers[name] = cb;}},
+    document: {body: new Element("body"), execCommand: () => false, documentElement: new Element("html"), getElementById: id => {
       assert.ok(elements.has(id), `Missing element ${id}`);
       return elements.get(id);
     }, createElement: tag => new Element(tag), createElementNS: (_ns, tag) => new Element(tag),
@@ -100,43 +71,22 @@ async function boot(initial = base(), {storage, getContext} = {}) {
     addEventListener: (name, cb) => {handlers[name] = cb;}},
     Option: class {constructor(name, value) {this.text = name; this.value = value;}},
     navigator: {clipboard: {writeText: async () => {throw new Error("iframe clipboard unavailable");}}},
-    setTimeout: (callback, delay) => {
-      timers.set(++nextTimer, {callback, delay});
-      return nextTimer;
-    },
-    clearTimeout: id => timers.delete(id),
+    setTimeout: () => 1, clearTimeout: () => {},
   });
   const api = await vm.runInContext(`(async () => {${source}\n; return {render, renderMonitor, action, poll};})()`, context);
-  return {api, bridge, requests, handlers, timers, win: context.window, navigator: context.navigator,
-    doc: context.document, get: id => elements.get(id)};
+  return {api, bridge, requests, handlers, doc: context.document, get: id => elements.get(id)};
 }
 
-test("theme cycles auto → light → dark → auto with sandbox storage blocked", async () => {
+test("theme toggle switches light and dark theme on documentElement", async () => {
   const ui = await boot();
-  const button = ui.get("theme-toggle");
-  assert.equal(button.textContent, "主题：自动");
-  for (const [theme, label] of [["light", "浅色"], ["dark", "深色"], [undefined, "自动"]]) {
-    button.onclick();
-    assert.equal(ui.doc.documentElement.dataset.theme, theme);
-    assert.equal(button.textContent, `主题：${label}`);
-  }
-});
-
-test("theme inherits host context and restores a stored manual choice", async () => {
-  const values = new Map();
-  const options = {
-    storage: {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)},
-    getContext: () => ({isDark: true}),
-  };
-  const ui = await boot(base(), options);
-  assert.equal(ui.doc.documentElement.dataset.theme, "dark");
   ui.get("theme-toggle").onclick();
-  const reopened = await boot(base(), options);
-  assert.equal(reopened.doc.documentElement.dataset.theme, "light");
-  reopened.get("theme-toggle").onclick();
-  reopened.get("theme-toggle").onclick();
-  assert.equal(reopened.get("theme-toggle").textContent, "主题：自动");
-  assert.equal(reopened.doc.documentElement.dataset.theme, "dark");
+  assert.equal(ui.doc.documentElement.dataset.themeMode, "dark");
+  assert.equal(ui.get("theme-toggle").textContent, "主题：深色");
+  ui.get("theme-toggle").onclick();
+  assert.equal(ui.get("theme-toggle").textContent, "主题：自动");
+  ui.get("theme-toggle").onclick();
+  assert.equal(ui.doc.documentElement.dataset.themeMode, "light");
+  assert.equal(ui.get("theme-toggle").textContent, "主题：浅色");
 });
 
 test("native bridge initialization populates real model and effort options", async () => {
@@ -166,42 +116,6 @@ test("startup diagnostics show search scope, stage and zero exit code", async ()
   assert.ok(ui.get("facts").children.some(row => row.textContent === "CLI 退出码：0"));
   assert.ok(ui.get("facts").children.some(row => row.textContent === "失败阶段：ACP 握手"));
   assert.equal(ui.get("install-details").open, true);
-});
-
-test("unchanged status preserves input selections, list nodes, and a manually closed drawer", async () => {
-  const data = base();
-  data.report.error_code = "STARTUP_EXIT";
-  data.report.customizations_mode = "minimal";
-  data.environment.install_command = "mock-install";
-  data.login = {state: "waiting", owned: true, url: "https://example.test/mock"};
-  const ui = await boot(data);
-  const facts = ui.get("facts").children;
-  const diag = ui.get("env-diag-list").children;
-  for (const id of ["install-command", "install-url", "auth-url"]) {
-    const input = ui.get(id);
-    const selected = input.value;
-    Object.defineProperty(input, "value", {
-      get: () => selected, set: () => assert.fail(`rewrote unchanged ${id}`),
-    });
-  }
-  ui.get("install-details").open = false;
-  ui.api.render(structuredClone(data));
-  assert.equal(ui.get("facts").children, facts);
-  assert.equal(ui.get("env-diag-list").children, diag);
-  assert.equal(ui.get("install-details").open, false);
-  data.report.error_code = "CLI_WRAPPER";
-  ui.api.render(data);
-  assert.equal(ui.get("install-details").open, true);
-});
-
-test("partial status and empty model catalog give consistent placeholders", async () => {
-  const ui = await boot({});
-  for (const [data, message] of [[{}, "先完成环境检测"],
-    [{report: {status: "passed", models: []}}, "环境已就绪，但未读取到模型目录"]]) {
-    ui.api.render(data);
-    assert.equal(ui.get("model").children[0].text, message);
-    assert.equal(ui.get("model-badge").textContent, message);
-  }
 });
 
 test("configured path and wrapper failures get distinct labels", async () => {
@@ -242,37 +156,6 @@ test("late status response cannot overwrite a newer save", async () => {
   assert.equal(ui.get("finish-badge").textContent, "已保存");
 });
 
-test("status retries at 5/10/20/30 seconds, recovers, and preserves action errors", async () => {
-  const ui = await boot();
-  const scheduled = () => [...ui.timers.values()].filter(t => t.callback === ui.api.poll);
-  ui.bridge.apiGet = async () => { throw new Error("status offline"); };
-  for (const delay of [5000, 10000, 20000, 30000, 30000]) {
-    await ui.api.poll();
-    assert.deepEqual(scheduled().map(t => t.delay), [delay]);
-    assert.equal(ui.get("error").textContent, "status offline");
-  }
-  ui.bridge.apiGet = async () => base();
-  await ui.api.poll();
-  assert.equal(ui.get("error").hidden, true);
-  ui.bridge.apiPost = async () => { throw new Error("save failed"); };
-  await ui.api.action("apply");
-  ui.bridge.apiGet = async () => { throw new Error("status offline"); };
-  await ui.api.poll();
-  assert.deepEqual(scheduled().map(t => t.delay), [5000]);
-  ui.bridge.apiGet = async () => base();
-  await ui.api.poll();
-  assert.equal(ui.get("error").textContent, "save failed");
-});
-
-test("login and action errors retain their raw code after translation", async () => {
-  const ui = await boot();
-  for (const [code, label] of [["LOGIN_EXPIRED", "登录已过期"], ["FUTURE_CODE", "操作失败"]]) {
-    ui.api.render({login: {state: "failed", error_code: code}, action_error: code});
-    assert.ok(ui.get("login-hint").textContent.includes(`${label}（${code}）`));
-    assert.equal(ui.get("error").textContent, `${label}（${code}）`);
-  }
-});
-
 test("authorization code clears immediately and URL clears while verifying", async () => {
   const data = base(); data.login = {state: "waiting", busy: true, owned: true, ticket: "fake-ticket", url: "https://accounts.google.com/fake", expires_in: 100};
   const ui = await boot(data);
@@ -288,149 +171,22 @@ test("authorization code clears immediately and URL clears while verifying", asy
   assert.equal(ui.get("authorization").hidden, true);
 });
 
-test("copy tries Clipboard first and runs execCommand during the click", async () => {
+test("copy failure selects text and offers keyboard fallback", async () => {
   const ui = await boot();
-  const button = ui.get("copy-install");
-  button.textContent = "复制文档地址";
-  const calls = [];
-  ui.navigator.clipboard.writeText = async text => {
-    calls.push(["clipboard", text]);
-    throw new Error("denied");
-  };
-  ui.doc.execCommand = command => {
-    const field = ui.doc.body.children.at(-1);
-    assert.equal(field.tag, "textarea");
-    assert.equal(field.selected, true);
-    calls.push([command, field.value]);
-    return true;
-  };
-  const copying = button.onclick();
-  const text = ui.get("install-url").value;
-  assert.deepEqual(calls, [["clipboard", text], ["copy", text]]);
-  assert.equal(ui.doc.body.children.length, 0);
-  await copying;
-  assert.equal(button.textContent, "已复制 ✓");
-  assert.equal(ui.get("copy-status").textContent, "已复制");
-  assert.equal(ui.get("copy-status").dataset.state, "ok");
-  await button.onclick();
-  const feedback = [...ui.timers.values()].filter(t => t.delay <= 3000);
-  assert.deepEqual(feedback.map(t => t.delay), [2000, 3000]);
-  feedback.forEach(t => t.callback());
-  assert.equal(button.textContent, "复制文档地址");
-  assert.equal(ui.get("copy-status").textContent, "");
-});
-
-test("all copy controls work without Clipboard API and manual selection is the last fallback", async () => {
-  const data = base();
-  data.environment.install_command = "install-example";
-  data.login = {state: "waiting", owned: true, url: "https://example.test/mock"};
-  data.providers = [{id: "instance", model: "test", enabled: true}];
-  const ui = await boot(data);
-  delete ui.navigator.clipboard;
-  ui.doc.execCommand = () => true;
-  const instanceButton = collectNodes(ui.get("configured")).find(n => n.tag === "button");
-  await instanceButton.click();
-  assert.equal(instanceButton.textContent, "已复制 ✓");
-  for (const id of ["copy-command", "copy-auth", "copy-install"]) {
-    await ui.get(id).onclick();
-    assert.equal(ui.get(id).textContent, "已复制 ✓");
-  }
-  ui.doc.execCommand = () => false;
-  await ui.get("copy-auth").onclick();
-  assert.equal(ui.get("auth-url").focused, true);
-  assert.equal(ui.get("auth-url").selected, true);
-  assert.equal(ui.get("copy-auth").textContent, "请手动复制");
-  assert.equal(ui.get("copy-status").dataset.state, "warn");
-  assert.match(ui.get("copy-status").textContent, /Ctrl\+C/);
-});
-
-test("Clipboard success survives execCommand failure and empty fields do nothing", async () => {
-  const ui = await boot();
-  let writes = 0;
-  ui.navigator.clipboard.writeText = async () => { writes++; };
-  let commands = 0;
-  ui.doc.execCommand = () => { commands++; throw new Error("blocked"); };
-  await ui.get("copy-auth").onclick();
-  assert.equal(ui.get("copy-status").textContent, "");
   await ui.get("copy-install").onclick();
-  assert.deepEqual([writes, commands], [1, 1]);
-  assert.equal(ui.get("copy-install").textContent, "已复制 ✓");
-  assert.equal(ui.doc.body.children.length, 0);
-});
-
-test("blocked authorization popup offers the copy link for null and thrown results", async () => {
-  const ui = await boot();
-  ui.get("auth-url").value = "https://example.test/mock";
-  for (const throws of [false, true]) {
-    const calls = [];
-    ui.win.open = (...args) => {
-      calls.push(args);
-      if (throws) throw new Error("sandbox");
-      return null;
-    };
-    ui.get("open-auth").onclick();
-    assert.deepEqual(calls, [[ui.get("auth-url").value, "_blank", "noopener"]]);
-    assert.equal(ui.get("copy-status").textContent, "浏览器拦截了新窗口，请用复制链接");
-  }
+  assert.equal(ui.get("install-url").selected, true);
+  assert.match(ui.get("copy-status").textContent, /Ctrl\+C/);
 });
 
 test("page exit clears sensitive fields and stops polling", async () => {
   const ui = await boot();
   ui.get("auth-code").value = "fake-code";
   ui.get("auth-url").value = "fake-url";
-  ui.handlers.pagehide({persisted: false});
+  ui.handlers.pagehide();
   assert.equal(ui.get("auth-code").value, "");
   assert.equal(ui.get("auth-url").value, "");
   ui.bridge.apiGet = () => {throw new Error("disposed page must not poll");};
   await ui.api.poll();
-});
-
-test("visibility and bfcache suspend reads and refresh both snapshots on return", async () => {
-  const data = base();
-  data.login = {state: "waiting", owned: true, url: "https://example.test/mock"};
-  const ui = await boot(data);
-  const reads = [];
-  ui.bridge.apiGet = async endpoint => {
-    reads.push(endpoint);
-    return endpoint === "setup/status" ? data : monitorPayload(null);
-  };
-  ui.doc.hidden = true;
-  ui.handlers.visibilitychange();
-  await ui.api.poll();
-  assert.deepEqual(reads, []);
-  ui.doc.hidden = false;
-  ui.handlers.visibilitychange();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(reads.sort(), ["monitor/status", "setup/status"]);
-  reads.length = 0;
-  ui.get("auth-code").value = "mock-code";
-  ui.handlers.pagehide({persisted: true});
-  assert.equal(ui.get("auth-url").value, data.login.url);
-  assert.equal(ui.get("auth-code").value, "mock-code");
-  await ui.api.poll();
-  assert.deepEqual(reads, []);
-  ui.handlers.pageshow({persisted: true});
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(reads.sort(), ["monitor/status", "setup/status"]);
-  assert.equal(ui.get("auth-code").value, "mock-code");
-});
-
-test("late action success or failure leaves a disposed page cleared", async () => {
-  for (const fail of [false, true]) {
-    const ui = await boot();
-    let finish;
-    const data = base();
-    data.login = {owned: true, url: "https://example.test/mock"};
-    ui.bridge.apiPost = () => new Promise((resolve, reject) => {
-      finish = () => fail ? reject(new Error("late error")) : resolve(data);
-    });
-    const started = ui.api.action("login");
-    ui.handlers.pagehide({persisted: false});
-    finish();
-    await started;
-    assert.equal(ui.get("auth-url").value, "");
-    assert.equal(ui.get("error").textContent, "");
-  }
 });
 
 test("model change resets thought effort and requests fresh catalog", async () => {
@@ -545,10 +301,10 @@ test("passed environment streamlines main hints and moves technical facts to adv
   assert.ok(diagTexts.some(t => t.includes("Unix Socket")));
   assert.ok(diagTexts.some(t => t.includes("独立进程组")));
   assert.ok(diagTexts.some(t => t.includes("组件模式")));
-  assert.ok(diagTexts.some(t => t.includes("CLI 更新策略")));
+  assert.equal(diagTexts.some(t => t.includes("CLI 更新策略")), false);
 });
 
-test("save feedback avoids redundant placeholder text and help popovers toggle in fallback mode", async () => {
+test("save feedback avoids redundant placeholder text and the page has no help popovers", async () => {
   const saved = base();
   saved.providers = [{id: "inst-1", model: "gemini-test", tools_mode: "chat", enabled: true}];
   saved.result = {provider_id: "inst-1", default_selected: false};
@@ -557,21 +313,10 @@ test("save feedback avoids redundant placeholder text and help popovers toggle i
   assert.equal(ui.get("finish-hint").textContent, "");
 
   const withDefault = {...saved, result: {provider_id: "inst-1", default_selected: true}};
-  ui.get("use-default").checked = true;
   ui.api.render(withDefault);
-  assert.equal(ui.get("use-default").checked, false);
-  ui.get("use-default").checked = true;
-  ui.api.render(structuredClone(withDefault));
-  assert.equal(ui.get("use-default").checked, true);
   assert.match(ui.get("finish-hint").textContent, /全局默认/);
 
-  assert.equal(ui.get("monitor-help").hidden, true);
-  ui.get("monitor-help-btn").click();
-  assert.equal(ui.get("monitor-help").hidden, false);
-  assert.equal(ui.get("monitor-help-btn").getAttribute("aria-expanded"), "true");
-  ui.handlers.keydown({key: "Escape"});
-  assert.equal(ui.get("monitor-help").hidden, true);
-  assert.equal(ui.get("monitor-help-btn").getAttribute("aria-expanded"), "false");
+  assert.doesNotMatch(html, /help-popover|popovertarget|scope-pill/);
 });
 
 test("monitor renders 3-layer hierarchy, SVG charts, 429 candidates, and keeps overview free of internal field names", async () => {
@@ -621,45 +366,36 @@ test("monitor renders 3-layer hierarchy, SVG charts, 429 candidates, and keeps o
   assert.ok(layer3 && layer3.open === false);
 
   const overviewTexts = collectNodes(overview).map(n => n.textContent).filter(Boolean);
-  assert.ok(overviewTexts.some(t => t === "实时会话池"));
   assert.ok(overviewTexts.some(t => t.includes("近 24h")));
-  assert.ok(overviewTexts.some(t => t === "最近采样"));
+  assert.equal(overviewTexts.some(t => t === "实时会话池" || t === "最近采样"), false);
   assert.ok(overviewTexts.some(t => t === "7 / 3"));
   assert.ok(overviewTexts.some(t => t.includes("RATE_LIMIT")));
   for (const forbidden of ["tools_mode", "effective_mode", "active_sessions", "total_input_other", "cachedReadTokens", "content_429_candidate"]) {
     assert.equal(overviewTexts.some(t => t.includes(forbidden)), false, `Overview exposed internal field ${forbidden}`);
   }
 
+  const overviewNodes = collectNodes(overview);
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("token-stack-svg")));
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("latency-svg")));
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("donut-svg")));
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("seg-svg")));
+  assert.equal(overviewNodes.filter(n => n.tag === "svg" && n.classList.contains("gauge-svg")).length, 2);
+  assert.ok(overviewTexts.includes("75.0%"));
+  assert.ok(overviewTexts.includes("60.0%"));
+
   const layer2Nodes = collectNodes(layer2);
   const layer2Texts = layer2Nodes.map(n => n.textContent).filter(Boolean);
-  assert.ok(layer2Nodes.some(n => n.tag === "svg" && n.classList.contains("token-stack-svg")));
-  assert.ok(layer2Nodes.some(n => n.tag === "svg" && n.classList.contains("latency-svg")));
-  assert.equal(layer2Nodes.filter(n => n.tag === "svg" && n.classList.contains("gauge-svg")).length, 2);
-  assert.ok(layer2Texts.includes("75.0%"));
-  assert.ok(layer2Texts.includes("60.0%"));
+  assert.ok(layer2Nodes.some(n => n.tag === "svg" && n.classList.contains("reason-svg")));
   assert.ok(layer2Texts.some(t => t.includes("冷启动 × 2")));
 
   const layer3Texts = collectNodes(layer3).map(n => n.textContent).filter(Boolean);
   assert.ok(layer3Texts.some(t => t.includes("a1b2c3d4") && t.includes("2,048B")));
-  assert.ok(layer3Texts.some(t => t.includes("reported=7")));
+  assert.equal(layer3Texts.some(t => t.includes("reported=7")), false);
 
-  const metric = collectNodes(overview).find(n => n.className === "monitor-metric");
-  assert.deepEqual(metric.children.map(n => n.tag), ["dt", "dd"]);
-  assert.ok(metric.children[1].children.some(n => n.className === "monitor-metric-sub"));
-
-  // Identical cards keep their DOM even when the snapshot timestamp advances.
+  // Preserving expanded <details> open state across refresh polls
   layer2.open = true;
   layer2.toggle();
-  ui.api.renderMonitor({...payload, sampled_at: "2026-11-17T00:07:00+00:00"});
-  assert.equal(ui.get("monitor-instances").children[0], card);
-  // A changed snapshot rebuilds cards while preserving only this instance's sections.
-  payload.instances.push(structuredClone(payload.instances[0]));
-  payload.instances[0].recent_turns[0].prompt_bytes = null;
   ui.api.renderMonitor(payload);
-  const [updated, duplicate] = ui.get("monitor-instances").children;
-  assert.notEqual(updated, card);
-  assert.equal(duplicate.children.find(n => n.classList.contains("monitor-details")).open, false);
-  assert.ok(collectNodes(updated).some(n => n.textContent.includes("prompt=未知 replay=0B")));
   const refreshedLayer2 = ui.get("monitor-instances").children[0].children.find(n => n.classList.contains("monitor-details"));
   assert.equal(refreshedLayer2.open, true);
 });
@@ -687,10 +423,12 @@ test("monitor distinguishes genuine 0.0% reuse rate from missing/null data and r
   ui.api.renderMonitor(payload);
 
   const [activeCard, idleCard] = ui.get("monitor-instances").children;
-  const activeLayer2Texts = collectNodes(activeCard.children.find(n => n.classList.contains("monitor-details"))).map(n => n.textContent).filter(Boolean);
-  assert.ok(activeLayer2Texts.includes("0.0%"));
-  assert.ok(activeLayer2Texts.includes("未报告缓存字段"));
-  assert.ok(activeLayer2Texts.some(t => t.includes("缓存读取 上游未报告")));
+  const activeOverviewTexts = collectNodes(activeCard.children.find(n => n.className === "monitor-overview")).map(n => n.textContent).filter(Boolean);
+  assert.ok(activeOverviewTexts.includes("0.0%"));
+  assert.ok(activeOverviewTexts.includes("未报告缓存字段"));
+  assert.ok(activeOverviewTexts.some(t => t.includes("缓存读取 上游未报告")));
+  // 无重建原因且无历史记录时不渲染空的详细记录层
+  assert.equal(activeCard.children.some(n => n.classList.contains("monitor-details")), false);
 
   const idleTexts = collectNodes(idleCard).map(n => n.textContent).filter(Boolean);
   assert.ok(idleTexts.some(t => t.includes("已配置未初始化")));
@@ -702,4 +440,86 @@ test("stylesheet and HTML enforce mobile overflow safety and system dark theme s
   assert.match(css, /@media\s*\(prefers-color-scheme:\s*dark\)/);
   assert.match(css, /minmax\(min\(100%,\s*360px\),\s*1fr\)/);
   assert.match(css, /overflow-wrap:\s*anywhere/);
+});
+
+test("setup progress stepper reflects environment, login, model and enabled instance", async () => {
+  const none = await boot(base());
+  const items = () => none.get("setup-progress").children;
+  assert.deepEqual(items().map(li => li.className), ["is-done", "is-done", "is-current", ""]);
+  assert.equal(items()[0].children[0].textContent, "✓");
+  assert.equal(items()[2].children[0].textContent, "3");
+
+  const done = base();
+  done.providers = [{id: "inst-1", model: "gemini-test", tools_mode: "chat", enabled: true}];
+  none.api.render(done);
+  assert.deepEqual(items().map(li => li.className), ["is-done", "is-done", "is-done", "is-done"]);
+
+  const blocked = base();
+  blocked.report = {status: "blocked", error_code: "NOT_INSTALLED"};
+  none.api.render(blocked);
+  assert.deepEqual(items().map(li => li.className), ["is-current", "", "", ""]);
+});
+
+test("app.js only references CSS variables defined in style.css", () => {
+  const css = readFileSync(new URL("../views/setup/style.css", import.meta.url), "utf8");
+  const defined = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map(([, name]) => name));
+  const referenced = new Set([...source.matchAll(/var\((--[\w-]+)/g)].map(([, name]) => name));
+  const missing = [...referenced].filter(name => !defined.has(name));
+  assert.deepEqual(missing, []);
+});
+
+test("connection indicator tracks ok, busy and error states and cancelled turns use warn tone", async () => {
+  const ui = await boot(base());
+  assert.equal(ui.get("connection").dataset.state, "ok");
+
+  const busy = base();
+  busy.busy = true;
+  ui.api.render(busy);
+  assert.equal(ui.get("connection").dataset.state, "busy");
+
+  ui.bridge.apiGet = async () => {throw new Error("network down");};
+  await ui.api.poll();
+  assert.equal(ui.get("connection").dataset.state, "error");
+
+  const payload = monitorPayload({
+    context_used: null, context_window_size: null, observed_at: null,
+    source: "not_reported", scope: "latest_live_session", model: "gemini-test",
+  });
+  payload.instances[0].recent_turns = [{
+    recorded_at: "2026-11-17T00:04:00+00:00", model: "gemini-test", mode: "chat",
+    status: "cancelled", error_code: null, elapsed_ms: 350,
+    input_other: null, input_cached: null, output: null, usage_status: "unavailable",
+    cache_fields_present: {cachedReadTokens: false, cachedWriteTokens: false},
+    context_used: null, context_window_size: null, observed_at: null,
+    reused: true, rebuild_reasons: [],
+    prompt_bytes: 120, replay_bytes: 0, omitted_messages: 0,
+    content_429_candidate: null,
+  }];
+  ui.api.renderMonitor(payload);
+  const nodes = collectNodes(ui.get("monitor-instances"));
+  assert.ok(nodes.some(n => n.className === "tone-warn" && n.textContent === "取消"));
+  assert.ok(nodes.some(n => n.tag === "rect" && n.attributes.fill === "var(--warn)"));
+});
+
+
+test("monitor v2 shows routing and redacted persistent diagnostics", async () => {
+  const ui = await boot();
+  const payload = monitorPayload({});
+  payload.schema_version = 2;
+  payload.routing = {configured_primary_id: "primary", resolved_primary_id: "resolved", last_observed_provider_id: "observed", explicit_fallback_ids: []};
+  payload.failure_events = [{error_code: "TIMEOUT", provider_tag: "tag", elapsed_ms: 50, recorded_at: "2026-11-24T00:00:00Z"}];
+  payload.failure_retention = {storage_state: "available"};
+  ui.api.renderMonitor(payload);
+  assert.equal(ui.get("routing-summary").children[0].children[1].textContent, "primary");
+  assert.equal(ui.get("routing-summary").children[1].children[1].textContent, "resolved");
+  assert.match(ui.get("failure-storage").textContent, /可用/);
+  assert.match(ui.get("persistent-failures").children[0].children[0].textContent, /TIMEOUT/);
+});
+test("HTTP sandbox can copy through synchronous fallback", async () => {
+  const ui = await boot();
+  let copied = false;
+  ui.doc.execCommand = name => {copied = name === "copy"; return copied;};
+  await ui.get("copy-install").onclick();
+  assert.equal(copied, true);
+  assert.equal(ui.get("copy-status").textContent, "已复制");
 });

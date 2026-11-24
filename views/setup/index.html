@@ -1,60 +1,195 @@
 <!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light dark" />
-    <meta name="referrer" content="no-referrer" />
-    <title>Antigravity ACP</title>
-    <style>
-      html {
-        background-color: #ffffff;
-        color: #1b1c1d;
-      }
-      html[data-theme="dark"] {
-        background-color: #1a1a1a;
-        color: #e8eaed;
-      }
-      @media (prefers-color-scheme: dark) {
-        html:not([data-theme="light"]) {
-          background-color: #1a1a1a;
-          color: #e8eaed;
-        }
-      }
-    </style>
-    <script>
-      (function () {
-        var root = document.documentElement;
-        var saved = null;
-        try {
-          var raw = window.localStorage.getItem("agy-acp.setup.theme");
-          if (raw === "light" || raw === "dark") saved = raw;
-        } catch (e) {}
-        if (saved) {
-          root.dataset.theme = saved;
-          return;
-        }
-        if (root.dataset.theme === "light" || root.dataset.theme === "dark") {
-          return;
-        }
-        try {
-          var param = new URLSearchParams(window.location.search).get("theme");
-          if (param === "light" || param === "dark") {
-            root.dataset.theme = param;
-            return;
-          }
-        } catch (e) {}
-        if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-          root.dataset.theme = "dark";
-        }
-      })();
-    </script>
-    <script type="module" crossorigin src="./assets/index-CS3oVo_I.js"></script>
-    <link rel="modulepreload" crossorigin href="./assets/vue-DLrUCKr0.js">
-    <link rel="modulepreload" crossorigin href="./assets/vuetify-D2kxUu16.js">
-    <link rel="stylesheet" crossorigin href="./assets/style-Cx79XeUM.css">
-  </head>
-  <body>
-    <div id="app"></div>
-  </body>
+<html lang="zh-CN" data-theme-mode="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Antigravity ACP</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-row">
+          <h1>Antigravity ACP</h1>
+          <span class="tag">Gemini CLI</span>
+        </div>
+        <p id="connection" class="connection" role="status">正在连接…</p>
+      </div>
+      <div class="toolbar">
+        <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button">主题：自动</button>
+      </div>
+    </header>
+
+    <div id="error" class="alert alert-error" role="alert" hidden></div>
+
+    <section class="card monitor" id="monitor" aria-labelledby="monitor-heading">
+      <div class="card-head">
+        <div class="card-title">
+          <h2 id="monitor-heading">运行监控</h2>
+        </div>
+        <div class="card-head-actions">
+          <span id="monitor-updated" class="small"></span>
+          <span id="monitor-badge" class="badge">正在加载</span>
+          <button id="monitor-refresh" class="btn btn-sm" type="button" disabled>刷新</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <p id="monitor-message" class="hint-text" role="status">正在读取…</p>
+        <details class="drawer"><summary>模型路由</summary><dl id="routing-summary" class="kv-list drawer-body"></dl></details>
+        <div id="monitor-instances" class="monitor-instances"></div>
+        <details class="drawer"><summary>持久失败诊断</summary><div class="drawer-body"><p id="failure-storage" class="small"></p><div id="persistent-failures" class="provider-list"></div></div></details>
+      </div>
+    </section>
+
+    <ol id="setup-progress" class="setup-progress" aria-label="设置进度"></ol>
+
+    <div class="grid">
+      <!-- 01 运行环境 -->
+      <section class="card" id="environment-step" aria-labelledby="environment-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <span class="step-index">01</span>
+            <h2 id="environment-heading">运行环境</h2>
+          </div>
+          <span id="check-badge" class="badge">等待检测</span>
+        </div>
+        <div class="card-body">
+          <div class="meta-line">
+            <span id="environment" class="meta-primary">正在读取系统信息…</span>
+          </div>
+          <div id="facts" class="facts"></div>
+          <p id="check-hint" class="hint-text" role="status"></p>
+          <div class="card-actions">
+            <button id="check" class="btn" type="button" disabled>重新检测</button>
+          </div>
+          <details id="env-diagnostics" class="drawer">
+            <summary>高级诊断</summary>
+            <div class="drawer-body">
+              <p id="discovery-hint" class="small"></p>
+              <dl id="env-diag-list" class="kv-list"></dl>
+            </div>
+          </details>
+          <details id="install-details" class="drawer">
+            <summary>CLI 安装与路径</summary>
+            <div class="drawer-body">
+              <p id="install-hint" class="small"></p>
+              <label for="install-command">安装命令</label>
+              <div class="copy-row">
+                <input id="install-command" readonly>
+                <button id="copy-command" class="btn btn-sm" type="button">复制</button>
+              </div>
+              <label for="install-url">官方文档</label>
+              <div class="copy-row">
+                <input id="install-url" readonly>
+                <button id="copy-install" class="btn btn-sm" type="button">复制</button>
+              </div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- 02 账号认证 -->
+      <section class="card" id="login-step" aria-labelledby="login-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <span class="step-index">02</span>
+            <h2 id="login-heading">Google 账号认证</h2>
+          </div>
+          <span id="login-badge" class="badge">等待检查</span>
+        </div>
+        <div class="card-body">
+          <p id="login-hint" class="hint-text"></p>
+          <div class="card-actions">
+            <button id="login" class="btn" type="button" disabled>官方登录</button>
+            <button id="cancel-login" class="btn btn-ghost" type="button" hidden>取消</button>
+          </div>
+          <div id="authorization" class="auth-box" hidden>
+            <label for="auth-url">1. 打开授权链接</label>
+            <div class="copy-row">
+              <input id="auth-url" readonly autocomplete="off" spellcheck="false">
+              <button id="copy-auth" class="btn btn-sm" type="button">复制链接</button>
+              <button id="open-auth" class="btn btn-sm" type="button">打开链接</button>
+            </div>
+            <form id="code-form" autocomplete="off">
+              <label for="auth-code">2. 粘贴授权码</label>
+              <div class="copy-row">
+                <input id="auth-code" type="password" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="粘贴一次性授权码" required>
+                <button id="submit-code" class="btn btn-primary btn-sm" type="submit">提交</button>
+              </div>
+            </form>
+          </div>
+          <details class="drawer">
+            <summary>终端命令行登录</summary>
+            <div class="drawer-body">
+              <p class="small">在 AstrBot 同运行用户下执行 <code>agy acp --login</code>，完成后点击「重新检测」。</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- 03 模型配置 -->
+      <section class="card" id="model-step" aria-labelledby="model-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <span class="step-index">03</span>
+            <h2 id="model-heading">模型配置</h2>
+          </div>
+          <span id="model-badge" class="badge">等待登录</span>
+        </div>
+        <div class="card-body">
+          <form id="model-form">
+            <div class="fields">
+              <div class="field field-wide">
+                <label for="model">Gemini 模型</label>
+                <select id="model" disabled><option value="">先完成环境检测</option></select>
+              </div>
+              <div class="field">
+                <label for="effort">思考强度</label>
+                <select id="effort" disabled><option value="default">跟随全局</option></select>
+              </div>
+              <div class="field">
+                <label for="tools-mode">实例模式</label>
+                <select id="tools-mode" disabled>
+                  <option value="chat">纯聊天</option>
+                  <option value="inherit">跟随全局开关</option>
+                  <option value="tools">工具模式</option>
+                </select>
+              </div>
+            </div>
+            <label class="checkbox">
+              <input id="use-default" type="checkbox">
+              <span>设为全局默认模型</span>
+            </label>
+            <div class="card-actions">
+              <button id="apply" class="btn btn-primary" type="submit" disabled>保存并启用</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- 04 已保存实例 -->
+      <section class="card" id="finish-step" aria-labelledby="finish-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <span class="step-index">04</span>
+            <h2 id="finish-heading">已启用实例</h2>
+          </div>
+          <span id="finish-badge" class="badge">等待配置</span>
+        </div>
+        <div class="card-body">
+          <p id="finish-hint" class="hint-text"></p>
+          <div id="configured" class="provider-list"></div>
+        </div>
+      </section>
+    </div>
+
+    <footer class="footer">
+      <span id="copy-status" class="copy-toast" role="status"></span>
+    </footer>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
 </html>

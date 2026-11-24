@@ -1,5 +1,12 @@
 # 变更记录
 
+## 0.8.1（2026-11-24；实机验收待 #31）
+
+- 前端选用 [feat/ui-redesign](https://github.com/sl251/astrbot_plugin_antigravity_acp/tree/feat/ui-redesign) 的最终可视化设计：环形占比、会话池分段条、上下文进度、Token 构成与耗时柱图、四步进度、连接状态、响应式布局和宿主主题。
+- 仅替换前端，保留 v0.8.0 的 #32 后端路由、历史图片预算、输入组织、防重放和脱敏持久失败记录。适配监控 schema v2、只读路由与失败诊断；设置与保存继续使用原生 Bridge 与 nonce。高级实例操作按钮不随旧界面恢复，可使用宿主原生模型管理；后端 API 保留。
+- 恢复原生 DOM 回归，保留 HTTP/受限 iframe 剪贴板降级和后台轮询生命周期。移除 Vue 构建目录与旧产物，分发不需要 Node.js。
+- 本版由跨平台 Python 回归及原生 JS 测试门控。实机、真实 CLI、生产与视觉验收待 #31；保留 v0.8.0 供回退。
+
 ## 0.8.0（2026-11-24；实机验收待 #31）
 
 - **原生 Dashboard 重构（#30）**：Vue 3 / Vuetify 3 / TypeScript / Vite 六模块界面，使用宿主 Plugin Views Bridge、相对资源路径及本地字体/图标；保留 #28 的复制降级与轮询边界。

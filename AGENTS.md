@@ -1,6 +1,6 @@
 # Agent 工作入口
 
-本仓库把官方 `agy acp`（stdio）接为 AstrBot 原生 `agy_acp` Provider。当前版本基线 **v0.8.0**，Python **3.11+**，AstrBot **`>=4.29.4,<4.30`**；版本以 [metadata.yaml](metadata.yaml) 为准。识别 4.30 的已知宿主提示文案，不代表兼容 4.30 的 runner/API。Hermes、Codex、AGY 从本页按任务读取资料，无需通读历史施工书。
+本仓库把官方 `agy acp`（stdio）接为 AstrBot 原生 `agy_acp` Provider。当前版本基线 **v0.8.1**，Python **3.11+**，AstrBot **`>=4.29.4,<4.30`**；版本以 [metadata.yaml](metadata.yaml) 为准。识别 4.30 的已知宿主提示文案，不代表兼容 4.30 的 runner/API。Hermes、Codex、AGY 从本页按任务读取资料，无需通读历史施工书。
 
 ## 必须保持的边界
 
@@ -21,7 +21,7 @@
 
 ## 按需阅读
 
-- #30/#32 当前实现见 [前端交接](docs/acp-30-frontend-handoff.md)、[后端交接](docs/acp-32-backend-handoff.md) 和 [离线 QA](docs/acp-30-32-offline-qa.md)（历史阶段证据）；实机与视觉验收仍见 [#31](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/31)。
+- 当前 UI 为 [views/setup/](views/setup/) 原生可视化实现（feat/ui-redesign）；v0.8.0 Vue 前端交接仅供历史追溯。后端 #32 见 [后端交接](docs/acp-32-backend-handoff.md)，实机待 #31。
 
 | 任务 | 首读 | 关键入口 |
 | --- | --- | --- |
@@ -38,7 +38,8 @@
 
 ```sh
 python -m unittest discover -s tests -v
-(cd frontend && npm ci --ignore-scripts && npm run typecheck && npm run build:ci && npm run verify:dist)
+node --check views/setup/app.js
+node --test tests/setup.test.mjs
 python -m compileall -q main.py agy_provider tests
 git diff --check
 ```

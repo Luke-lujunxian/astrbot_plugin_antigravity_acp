@@ -8,32 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  frontend:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci --ignore-scripts
-      - name: Typecheck frontend
-        working-directory: frontend
-        run: npm run typecheck
-      - name: Build frontend into temporary dist
-        working-directory: frontend
-        run: npm run build:ci
-      - name: Verify committed views/setup artifacts match build
-        working-directory: frontend
-        run: npm run verify:dist
-
   test:
     strategy:
       fail-fast: false
@@ -57,40 +31,41 @@ jobs:
         run: python -B -m compileall -q main.py agy_provider tests
       - name: Offline Python regressions
         run: python -m unittest discover -s tests -v
+      - name: Setup view syntax
+        run: node --check views/setup/app.js
       - name: Setup view interaction regressions
         run: node --test tests/setup.test.mjs
 
-  # One-shot v0.8.0 release, only after the exact release-preparation push passes CI.
-  release_v080:
+  release_v081:
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'chore(release): prepare v0.8.0'
-    needs: [frontend, test]
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.1 visual dashboard'
+    needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Package and publish v0.8.0
+      - name: Package and publish v0.8.1
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          grep -Fx 'version: 0.8.0' metadata.yaml
-          grep -Fx 'PLUGIN_VERSION = "0.8.0"' agy_provider/_version.py
-          asset=astrbot_plugin_antigravity_acp_v0.8.0.zip
+          grep -Fx 'version: 0.8.1' metadata.yaml
+          grep -Fx 'PLUGIN_VERSION = "0.8.1"' agy_provider/_version.py
+          asset=astrbot_plugin_antigravity_acp_v0.8.1.zip
           git archive --format=zip --prefix=astrbot_plugin_antigravity_acp/ -o "$asset" "$GITHUB_SHA"
           unzip -t "$asset"
-          cat > /tmp/v080-notes.md <<'NOTES'
-          ## v0.8.0
+          for f in index.html app.js style.css; do unzip -Z1 "$asset" | grep -Fx "astrbot_plugin_antigravity_acp/views/setup/$f"; done
+          if unzip -Z1 "$asset" | grep -E '/views/setup/assets/|/frontend/|/tests/|/docs/'; then exit 1; fi
+          cat > /tmp/v081-notes.md <<'NOTES'
+          ## v0.8.1
           
-          - 原生 Dashboard 六模块重构（Vue 3 / Vuetify 3 / TypeScript）。
-          - 默认模型路由核对、当前输入与历史分离、历史图片预算修复。
-          - 安全 fallback 边界、CLI 告警过滤与持久脱敏失败诊断。
+          - 恢复 feat/ui-redesign 的原生可视化界面：环形统计、会话池、Token 堆叠、耗时柱图、四步设置。
+          - 保留 v0.8.0 后端修复，适配监控 v2、路由回读与持久失败诊断。
+          - 恢复原生 JS 测试与受限 iframe 复制降级。高级实例管理仍可通过宿主模型管理使用。
           
-          完整改动：[PR #34](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/34)、[CHANGELOG](https://github.com/sl251/astrbot_plugin_antigravity_acp/blob/v0.8.0/CHANGELOG.md)。
-          
-          本发布由 Linux/Windows 前端构建一致性检查及 Python 3.11/3.12 回归门控。旧 DOM 测试不覆盖新版交互；真实 CLI、宿主 iframe、QQ、生产与视觉验收仍待 #31。#32 §5 延期。支持 AstrBot >=4.29.4,<4.30、Python 3.11+；升级前备份配置，回退使用 v0.7.5。
+          实机、真实 CLI 与视觉验收待 #31。支持 AstrBot >=4.29.4,<4.30、Python 3.11+。旧版 v0.8.0 保留，完整改动见 CHANGELOG。
           NOTES
-          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v080-notes.md
-          gh release create v0.8.0 "$asset" --target "$GITHUB_SHA" --title "v0.8.0" --notes-file /tmp/v080-notes.md --latest
+          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v081-notes.md
+          gh release create v0.8.1 "$asset" --target "$GITHUB_SHA" --title "v0.8.1" --notes-file /tmp/v081-notes.md --latest

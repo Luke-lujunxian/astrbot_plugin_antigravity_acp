@@ -1,6 +1,6 @@
 # 测试、验收与交付规范
 
-适用基线 **v0.8.0**，Python **3.11+**、AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。数量由本次运行得出，不把旧版本测试总数当作当前结果。
+适用基线 **v0.8.1**，Python **3.11+**、AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。数量由本次运行得出，不把旧版本测试总数当作当前结果。
 
 ## 开发流程
 
@@ -41,8 +41,9 @@ python -m unittest tests.test_telemetry tests.test_monitoring -v
 # 启动、认证、登录、模型保存
 python -m unittest tests.test_auth_config tests.test_login tests.test_diagnostics tests.test_onboarding -v
 
-# 新版 Dashboard 类型检查、构建与静态产物一致性
-(cd frontend && npm ci --ignore-scripts && npm run typecheck && npm run build:ci && npm run verify:dist)
+# 原生可视化 Dashboard 语法与 DOM 回归
+node --check views/setup/app.js
+node --test tests/setup.test.mjs
 ```
 
 对于单项故障，可在已定位测试类后继续指定单个方法；不要假定测试文件名与旧分支相同。源路径映射见 [故障定位索引](architecture.md#故障定位索引)。
@@ -59,7 +60,7 @@ python -m unittest tests.test_prompt_images tests.test_media tests.test_sessions
 python -m unittest tests.test_routing tests.test_b06_side_effects tests.test_b07_b08_regressions tests.test_failure_events -v
 ```
 
-旧 `tests/setup.test.mjs` 在 `views/setup/app.js` 不存在时退出；不将其成功退出计作新版交互用例通过。新版真实 iframe/视觉测试待 #31。
+v0.8.1 恢复原生 DOM 回归，需实际执行测试；覆盖监控 v2、复制降级等，真实 iframe/视觉测试待 #31。
 
 ## 全量离线回归
 
