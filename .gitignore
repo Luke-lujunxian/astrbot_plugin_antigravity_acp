@@ -21,3 +21,7 @@ sessions.json
 .vscode/
 .DS_Store
 codex-m2m3*.out
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.tsbuildinfo

@@ -54,29 +54,33 @@ def _install_replay_guard(runner_cls, state):
         if not state.enabled or scope is None or scope["runner"] is not self:
             return state.responses(self, *args, **kwargs)
 
+        provider = getattr(self, "provider", None)
+        if scope["blocked"] is None and not _owned(provider, state):
+            return state.responses(self, *args, **kwargs)
+
         async def guarded():
             if scope["blocked"] is not None:
                 from astrbot.core.provider.entities import LLMResponse
 
                 yield LLMResponse(role="err", completion_text=str(scope["blocked"]))
                 return
-            provider = getattr(self, "provider", None)
             source = state.responses(self, *args, **kwargs)
-            emitted = False
+            committed = False
             try:
                 async for response in source:
-                    emitted = emitted or bool(
-                        getattr(response, "completion_text", "")
-                        or getattr(response, "reasoning_content", "")
+                    committed = committed or bool(
+                        (getattr(response, "completion_text", "") or "").strip()
                         or getattr(response, "tools_call_ids", None)
                     )
                     yield response
-            except AgyError as exc:
-                if _owned(provider, state) and (exc.no_fallback or emitted):
-                    exc.no_retry = True
-                    exc.no_fallback = True
-                    scope["blocked"] = exc
+            except Exception as exc:
+                if committed or isinstance(exc, AgyError) and exc.no_fallback:
+                    failure = exc if isinstance(exc, AgyError) else AgyError("UPSTREAM", "交付后宿主请求失败。")
+                    failure.no_retry = failure.no_fallback = True
+                    scope["blocked"] = failure
                     scope["provider"] = provider
+                    if failure is not exc:
+                        raise failure from None
                 raise
             finally:
                 await source.aclose()

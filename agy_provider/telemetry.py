@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 
 from astrbot.api import logger
 
+from .failure_events import FailureJournal, STOP_REASONS, event_fields, MAX_BYTES, MAX_EVENTS, TTL
+
 MAX_HISTORY_TURNS = 100
 MAX_TOMBSTONES = 1024
 TOMBSTONE_TTL_SECONDS = 3600
@@ -62,8 +64,47 @@ TOOLS_DISABLED TOOL_ARGUMENTS TOOL_BUDGET TOOL_CANCELLED TOOL_CHOICE
 TOOL_CONCURRENCY TOOL_CONTEXT TOOL_DUPLICATE TOOL_HISTORY TOOL_ID TOOL_PERMISSION
 TOOL_PROTOCOL TOOL_RESULT TOOL_RESULT_LIMIT TOOL_SCHEMA TOOL_SESSION TOOL_STALE
 TOOL_TERMINATED TOOL_TIMEOUT TOOL_UNKNOWN TRANSPORT UNSUPPORTED UPSTREAM
-CLI_WRAPPER COMMAND_NOT_FOUND PROXY_AUTH PROXY NETWORK TLS
+CLI_WRAPPER COMMAND_NOT_FOUND PROXY_AUTH PROXY NETWORK TLS IMAGE IMAGE_BYTES IMAGE_COUNT
+IMAGE_DOWNLOAD IMAGE_EOI IMAGE_FORMAT IMAGE_MIME IMAGE_PATH IMAGE_PIXELS IMAGE_SSRF
+IMAGE_TIMEOUT IMAGE_URL IMAGES_DISABLED HOST ROUTE_MISMATCH REFERENCE_BLOCKED
 """.split())
+
+
+_journal = None
+_last_service = (None, None)
+
+
+def start_diagnostics(root):
+    global _journal, _last_service
+    stop_diagnostics()
+    _last_service = (None, None)
+    _journal = FailureJournal(root, MONITOR_ERROR_CODES)
+
+
+def stop_diagnostics():
+    global _journal
+    if _journal is not None:
+        _journal.close()
+        _journal = None
+
+
+def provider_tag(provider_id):
+    return _journal.provider_tag(provider_id) if _journal is not None else None
+
+
+def failure_snapshot():
+    if _journal is not None:
+        return _journal.snapshot()
+    return {"failure_events": [], "failure_retention": {
+        "ttl_seconds": TTL, "max_events": MAX_EVENTS, "max_bytes": MAX_BYTES,
+        "storage_state": "unavailable",
+    }}
+
+
+def last_service_observation():
+    provider, stamp = _last_service
+    return {"last_observed_provider_id": provider, "last_observed_at": stamp,
+            "last_observed_scope": "plugin_only" if stamp else "unknown"}
 
 
 def safe_label(value: object) -> str:
@@ -170,6 +211,18 @@ class TurnMeter:
         self._detail_free_exhausted = False
         self._retry_attempt: str | None = None
         self._has_output = False
+        self.negotiated_model = None
+        self.logical_request_tag = None
+        self.chunk_seen = False
+        self.body_seen = False
+        self.body_streamed = False
+        self.tool_handed_off = False
+        self.tool_result_supplied = False
+        self.body_bytes = 0
+        self.thought_bytes = 0
+        self.permission_denial_count = None
+        self.filtered_notice_count = None
+        self.stop_reason = None
         self._cache_fields_present: dict[str, bool] = {
             "cachedReadTokens": False,
             "cachedWriteTokens": False,
@@ -214,9 +267,16 @@ class TurnMeter:
         context = getattr(client, "context_usage", None)
         if context is not None:
             self.context = context.summary()
-        retries = getattr(getattr(client, "text_guard", None), "retries", None)
+        guard = getattr(client, "text_guard", None)
+        retries = getattr(guard, "retries", None)
         code = getattr(retries, "fast_fail_code", "")
         self.fast_abort_reason = code if code in {"QUOTA", "RATE_LIMIT", "AUTH"} else None
+        if getattr(client, "prompt_sent", False):
+            self.permission_denial_count = _valid_nonneg_int(getattr(client, "permission_denial_count", None))
+            self.filtered_notice_count = _valid_nonneg_int(getattr(guard, "filtered_count", None))
+            self.stop_reason = getattr(client, "terminal_reason", None)
+            self.negotiated_model = (getattr(client, "confirmed_model", None)
+                                     if getattr(context, "model_known", False) else None)
         if retries is not None:
             self._detail_free_exhausted = self._detail_free_exhausted or bool(
                 getattr(retries, "detail_free_seen", False)
@@ -224,6 +284,21 @@ class TurnMeter:
             attempt = getattr(retries, "attempt_number", None)
             if attempt:
                 self._retry_attempt = str(attempt)
+
+    def observe_chunk(self, kind, text, *, streaming):
+        self.chunk_seen = True
+        size = len(text.encode())
+        if kind == "thought":
+            self.thought_bytes += size
+        else:
+            self.body_bytes += size
+            if text.strip():
+                self.body_seen = True
+                self.body_streamed |= streaming
+
+    @property
+    def replay_blocked(self):
+        return self.body_seen or self.tool_handed_off or self.tool_result_supplied
 
     def observe_output(self, *, has_output: bool) -> None:
         """Record whether this turn produced any body text, thought, or tool call."""
@@ -301,7 +376,30 @@ class TurnMeter:
             usage_status = "unavailable"
             usage_source = None
 
+        fallback_reason = None
+        if status in {"error", "short_circuited"}:
+            if self.tool_handed_off:
+                fallback_reason = "tool_handoff"
+            elif self.tool_result_supplied:
+                fallback_reason = "tool_continuation"
+            elif self.body_seen:
+                fallback_reason = "visible_prefix"
+            else:
+                fallback_reason = "no_visible_prefix"
         record = {
+            "logical_request_tag": self.logical_request_tag,
+            "negotiated_model": self.negotiated_model,
+            "cli_retry_attempt": int(self._retry_attempt) if self._retry_attempt
+            and re.fullmatch("[0-9]{1,9}", self._retry_attempt) else None,
+            "chunk_seen": self.chunk_seen, "body_seen": self.body_seen,
+            "body_streamed": self.body_streamed, "tool_handed_off": self.tool_handed_off,
+            "tool_result_supplied": self.tool_result_supplied,
+            "body_bytes": self.body_bytes, "thought_bytes": self.thought_bytes,
+            "stop_reason": self.stop_reason if self.stop_reason in STOP_REASONS else None,
+            "permission_denial_count": self.permission_denial_count,
+            "filtered_notice_count": self.filtered_notice_count,
+            "fallback_allowed": fallback_reason == "no_visible_prefix" if fallback_reason else None,
+            "fallback_reason": fallback_reason,
             "event": "agy.turn",
             "v": 1,
             "provider": self.provider,
@@ -414,6 +512,11 @@ class TelemetryTracker:
     def record_turn(self, record: dict) -> None:
         self._prune_history()
         record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+        global _last_service
+        if record.get("status") == "ok" and record.get("request_sent") and record.get("provider"):
+            _last_service = (safe_label(record["provider"]), record["recorded_at"])
+        elif _journal is not None and record.get("status") != "ok":
+            _journal.append(record)
         self.history.append(record)
         self._history_times.append(self.clock())
         if self.cost_log_enabled:
@@ -442,7 +545,8 @@ class TelemetryTracker:
                     key: record.get("cache_fields_present", {}).get(key) is True
                     for key in ("cachedReadTokens", "cachedWriteTokens")
                 },
-                **safe_context(record),
+                **safe_context(record), **event_fields(record),
+                "negotiated_model": safe_label(record.get("negotiated_model")) or None,
             }
             for key in ("elapsed_ms", "input_other", "input_cached", "output", "prompt_bytes", "replay_bytes", "omitted_messages"):
                 row[key] = _valid_nonneg_int(record.get(key))

@@ -554,6 +554,9 @@ class Runtime:
                     session.model, session.effort = model, effort
                     session.had_transient = False
 
+                # select() validated this id against the CLI catalog, including on
+                # the retained session's initial negotiation.
+                local_meter.model = model
                 prompt = attach_transient_data(
                     prompt,
                     context,

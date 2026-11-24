@@ -1,9 +1,20 @@
-# GitHub 归档打包（main.zip / Release 源码包）排除开发、测试与历史审查目录及文件
+# GitHub 归档打包（main.zip / Release 源码包）排除开发、测试、前端源码与历史审查目录及文件
+# 注意：/views/setup/** 承载已构建的纯静态产物，必须在 git archive 中保留，用户部署无需 Node.js
 /.gitattributes export-ignore
 /.gitignore export-ignore
 /.github export-ignore
+/frontend export-ignore
+/frontend/** export-ignore
 /tests export-ignore
 /tools export-ignore
 /docs export-ignore
 /docs/** export-ignore
 /AGENTS.md export-ignore
+
+# 统一前端源码与构建文本产物换行符，避免跨平台构建哈希漂移
+/frontend/** text eol=lf
+/views/setup/** text eol=lf
+/views/setup/**/*.woff2 binary
+/views/setup/**/*.woff binary
+/views/setup/**/*.png binary
+/views/setup/**/*.ico binary

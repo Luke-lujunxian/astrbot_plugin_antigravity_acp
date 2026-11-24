@@ -46,12 +46,21 @@ class _AgentTextGuard:
         self.line_start = True
         self.notices = TerminalNoticeGuard()
         self.retries = RetryNoticeGuard()
+        self.terminal_notice_count = 0
+
+    @property
+    def filtered_count(self):
+        return self.retries.filtered_count + self.terminal_notice_count
 
     def feed(self, text: str, *, final=False) -> str:
         text = self.retries.feed(text, final=final)
         if self.retries.fast_fail_code:
             raise classified_error(self.retries.fast_fail_code)
-        text = self.pending + self.notices.feed(text, final=final)
+        try:
+            text = self.pending + self.notices.feed(text, final=final)
+        except AgyError:
+            self.terminal_notice_count += 1
+            raise
         self.pending = ""
         output = []
         while text:
@@ -59,6 +68,7 @@ class _AgentTextGuard:
             if self.line_start:
                 candidate = line.strip()
                 if candidate in self.markers and (newline or final):
+                    self.terminal_notice_count += 1
                     code = self.retries.error_code or "UPSTREAM"
                     raise AgyError(code, "AGY agent 执行失败，请检查官方 CLI。")
                 possible = any(
@@ -71,7 +81,16 @@ class _AgentTextGuard:
             output.append(line + newline)
             self.line_start = bool(newline)
             text = rest
+        if final:
+            self.line_start = True
         return "".join(output)
+
+    def end_segment(self, *, before_tool=False):
+        """Flush pending text before handoff or completion."""
+        tail = self.feed("", final=True)
+        if before_tool:
+            self.retries.begin_segment()
+        return tail
 
 
 class AcpClient:
@@ -94,6 +113,9 @@ class AcpClient:
         self.initialized = False
         self.close_lock = asyncio.Lock()
         self.tool_broker = None
+        self.permission_denial_count = 0
+        self.terminal_reason = None
+        self.confirmed_model = None
         self.permission_errors: list[PermissionDenial] = []
         self.permission_grants: set[str] = set()
         self.prompt_deadline = 0
@@ -465,16 +487,17 @@ class AcpClient:
                     self._current_update(params)
                     and not self.prompt_terminal
                     and asyncio.get_running_loop().time() < self.prompt_deadline
-                    and len(self.permission_errors) < 128
                 ):
-                    call = params.get("toolCall")
-                    call = call if isinstance(call, dict) else {}
-                    name, ident = call.get("name"), call.get("toolCallId")
-                    self.permission_errors.append(PermissionDenial(
-                        method="session/request_permission",
-                        tool_name=name[:256] if isinstance(name, str) else None,
-                        tool_call_id=ident[:256] if isinstance(ident, str) else None,
-                    ))
+                    self.permission_denial_count += 1
+                    if len(self.permission_errors) < 128:
+                        call = params.get("toolCall")
+                        call = call if isinstance(call, dict) else {}
+                        name, ident = call.get("name"), call.get("toolCallId")
+                        self.permission_errors.append(PermissionDenial(
+                            method="session/request_permission",
+                            tool_name=name[:256] if isinstance(name, str) else None,
+                            tool_call_id=ident[:256] if isinstance(ident, str) else None,
+                        ))
         else:
             reply["error"] = {
                 "code": -32601,
@@ -536,7 +559,7 @@ class AcpClient:
         if kind in {"tool_call", "tool_call_update"}:
             # Flush a possible terminal notice before any tool can be handed
             # to the host. Never retry or replay a tool as part of this guard.
-            tail = self.text_guard.feed("", final=True)
+            tail = self.text_guard.end_segment(before_tool=True)
             if tail:
                 try:
                     self.events.put_nowait(Event("text", tail))
@@ -579,6 +602,8 @@ class AcpClient:
         self.text_guard = _AgentTextGuard()
         self.permission_grants.clear()
         self.permission_errors.clear()
+        self.permission_denial_count = 0
+        self.terminal_reason = None
         self.active = True
         if self.tool_broker is not None:
             self.tool_broker.turn_active = True
@@ -637,6 +662,8 @@ class AcpClient:
                     continue
                 if response.done():
                     result = await response
+                    reason = result.get("stopReason")
+                    self.terminal_reason = reason if isinstance(reason, str) else None
                     if self._record_usage(result, "acp_terminal"):
                         yield Event(
                             "usage",
@@ -657,7 +684,7 @@ class AcpClient:
                         raise self._diagnose(
                             AgyError(code, "AGY agent 执行失败，请检查官方 CLI。")
                         )
-                    remaining = self.text_guard.feed("", final=True)
+                    remaining = self.text_guard.end_segment()
                     if remaining:
                         yield Event("text", remaining)
                     if self.text_guard.retries.error_code:
