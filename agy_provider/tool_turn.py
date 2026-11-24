@@ -290,6 +290,8 @@ class ToolTurn:
                     if self.finished:
                         raise AgyError("TOOL_STALE", "工具请求已失效。")
                     item.result["broker"].handoff(item.result["call"])
+                    if self.meter is not None:
+                        self.meter.tool_handed_off = True
                     keep = True
                     yield item
                     return

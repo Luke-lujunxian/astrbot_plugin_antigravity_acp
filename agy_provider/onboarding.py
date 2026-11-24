@@ -14,6 +14,8 @@ from .errors import AgyError
 from .login import LoginFlow
 from .paths import plugin_data_root
 from .probe import probe
+from .routing import (OverrideObservations, dashboard_admin, enable_provider,
+                      provider_impact, routing_snapshot, select_default)
 
 PLUGIN_NAME = "astrbot_plugin_antigravity_acp"
 HINTS = {
@@ -39,6 +41,8 @@ HINTS = {
     "QUOTA": "上游额度不足，请在官方客户端检查额度。",
     "LOGIN_URL": "未取得授权链接，请在同一运行环境执行 agy acp --login，然后重新检测。",
     "HOST": "提供商配置未完成，请检查 AstrBot 模型页面；已创建的实例会保留，重试不会重复创建。",
+    "ROUTE_MISMATCH": "全局 runner 未确认选择目标实例，请查看路由诊断并显式选择实例。",
+    "REFERENCE_BLOCKED": "请查看影响预览。存在引用或扫描不完整时，插件阻止删除和停用。",
     "LOCAL": "本地操作未完成，请检查数据目录权限、宿主版本和运行环境，再重新检测。",
 }
 
@@ -179,6 +183,8 @@ class Onboarding:
         self.action_error = ""
         self.login = LoginFlow(settings, self.root, self._check)
         self.routes = []
+        self.overrides = OverrideObservations()
+        self.override_hook = self.overrides.changed
 
     @property
     def busy(self):
@@ -218,6 +224,7 @@ class Onboarding:
             "report": deepcopy(self.report), "hint": next_step(self.report),
             "environment": environment(self.settings), "login": self.login.snapshot(owner),
             "providers": self.providers(), "result": self.result,
+            "routing": routing_snapshot(self.context.provider_manager),
             "action_error": self.action_error,
             "action_hint": HINTS.get(self.action_error, "操作未完成，请重新检测或查看模型配置。") if self.action_error else "",
             "global_effort": self.settings.thought_level,
@@ -249,7 +256,7 @@ class Onboarding:
             except AgyError as exc:
                 self.action_error = exc.code
             except Exception:
-                self.action_error = "HOST" if operation == "apply" else "LOCAL"
+                self.action_error = "HOST" if operation == "apply" or operation.startswith("provider-") else "LOCAL"
             finally:
                 self.operation = ""
 
@@ -294,7 +301,6 @@ class Onboarding:
             raise cancelled
 
     async def _save_provider(self, model, effort, use_default, tools_mode=None):
-        from astrbot.core.provider.entities import ProviderType
         from .provider import DEFAULT_CONFIG, PROVIDER_TYPE
 
         target_mode = "chat" if tools_mode is None else tools_mode
@@ -313,17 +319,13 @@ class Onboarding:
                 and candidate_effort == effort
                 and (match_any_mode or candidate_mode == target_mode)
             ):
+                if existing is not None:
+                    raise AgyError("CONFIG", "多个 ACP 实例匹配，请在模型管理中显式选择实例 ID。")
                 existing = candidate
-                break
         if existing is not None:
             provider_id = existing["id"]
-            # A failed host save can leave a loaded, enabled instance only in
-            # memory. Re-persist on explicit save, including retries/reloads,
-            # before reporting success. Preserve all existing custom fields.
-            config = deepcopy(existing)
-            config["enable"] = True
-            await manager.update_provider(provider_id, config)
-            effective_mode = (config.get("custom_extra_body") or {}).get("agy_tools_mode", "inherit")
+            effective_mode = (existing.get("custom_extra_body") or {}).get("agy_tools_mode", "inherit")
+            await enable_provider(manager, provider_id, expected=deepcopy(existing), use_default=use_default)
         else:
             suffix_seed = (
                 f"{model}\0{effort}"
@@ -357,13 +359,32 @@ class Onboarding:
             "model": model,
             "tools_mode": effective_mode,
             "default_selected": False,
+            "provider_state": "existing" if existing is not None else "created",
         }
         if use_default:
-            await manager.set_provider(provider_id, ProviderType.CHAT_COMPLETION)
+            if existing is None:
+                await select_default(manager, provider_id)
             self.result["default_selected"] = True
 
+    async def _manage(self, action, provider_id, enabled):
+        manager = self.context.provider_manager
+        impact = provider_impact(manager, provider_id, self.overrides)
+        self.result = {"provider_id": provider_id, "impact": impact, "applied": False}
+        if action == "provider-default":
+            await select_default(manager, provider_id)
+        elif action == "provider-toggle" and enabled:
+            await enable_provider(manager, provider_id)
+        else:
+            # 4.29.4 cannot enumerate all overrides under the resource lock.
+            raise AgyError("REFERENCE_BLOCKED", "引用或扫描边界阻止此操作。")
+        self.result.update(applied=True, impact=provider_impact(manager, provider_id, self.overrides))
+
     def register(self):
-        for action in ("status", "check", "login", "login-code", "login-cancel", "apply"):
+        manager = self.context.provider_manager
+        if callable(getattr(manager, "register_provider_change_hook", None)):
+            manager.register_provider_change_hook(self.override_hook)
+        for action in ("status", "check", "login", "login-code", "login-cancel", "apply",
+                       "provider-impact", "provider-default", "provider-delete", "provider-toggle"):
             async def handler(action=action):
                 return await self.handle(action)
 
@@ -379,6 +400,8 @@ class Onboarding:
         # Check identity here too, including direct handler invocations.
         if not request.username:
             return error_response("请先登录 AstrBot 管理面板。", status_code=401, headers=headers)
+        if not dashboard_admin(self.context.provider_manager, request.username):
+            return error_response("仅 AstrBot 面板管理员可使用设置页面。", status_code=403, headers=headers)
         try:
             if self.closed:
                 raise AgyError("CLOSED", "插件已停用。")
@@ -399,7 +422,27 @@ class Onboarding:
                 model = data.get("model", "")
                 if not isinstance(model, str) or len(model) > 1024:
                     raise AgyError("CONFIG", "模型 ID 无效。")
-                if action == "check":
+                if action.startswith("provider-"):
+                    self._available()
+                    provider_id = data.get("provider_id")
+                    if (not isinstance(provider_id, str) or not provider_id.strip()
+                            or len(provider_id) > 1024):
+                        raise AgyError("CONFIG", "实例 ID 无效。")
+                    fields = {"csrf", "provider_id"}
+                    if action != "provider-impact":
+                        fields.add("confirm")
+                    if action == "provider-toggle":
+                        fields.add("enabled")
+                    if data.keys() != fields:
+                        raise AgyError("CONFIG", "实例操作参数无效。")
+                    if action == "provider-impact":
+                        impact = provider_impact(self.context.provider_manager, provider_id, self.overrides)
+                        return json_response({"impact": impact}, headers=headers)
+                    if data["confirm"] is not True or (action == "provider-toggle"
+                                                       and type(data["enabled"]) is not bool):
+                        raise AgyError("CONFIG", "请明确确认实例操作和目标状态。")
+                    self._launch(action, lambda: self._manage(action, provider_id, data.get("enabled")))
+                elif action == "check":
                     self.start_check(model)
                 elif action == "login":
                     self._available()
@@ -427,7 +470,11 @@ class Onboarding:
         self.closed = True
         registered = self.context.registered_web_apis
         registered[:] = [row for row in registered if not any(row[0] == route and row[1] is handler for route, handler in self.routes)]
+        hooks = getattr(self.context.provider_manager, "_provider_change_hooks", [])
+        if self.override_hook in hooks:
+            hooks.remove(self.override_hook)
         if self.busy:
-            self.job.cancel()
+            if not self.operation.startswith("provider-"):
+                self.job.cancel()
             await asyncio.gather(self.job, return_exceptions=True)
         await self.login.close()

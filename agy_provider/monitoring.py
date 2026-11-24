@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 
 from .onboarding import PLUGIN_NAME
+from .routing import dashboard_admin, routing_snapshot
+from .telemetry import failure_snapshot
 
 
 class Monitoring:
@@ -29,12 +31,7 @@ class Monitoring:
         if not username:
             return error_response("请先登录 AstrBot 管理面板。", status_code=401, headers=headers)
         manager = self.context.provider_manager
-        try:
-            admin = manager.acm.default_conf["dashboard"]["username"]
-        except (AttributeError, KeyError, TypeError):
-            admin = None
-        if (not isinstance(username, str) or username.startswith("api_key:")
-                or not isinstance(admin, str) or not admin or username != admin):
+        if not dashboard_admin(manager, username):
             return error_response("仅 AstrBot 面板管理员可查看运行概览。", status_code=403, headers=headers)
         if self.closed:
             return error_response("插件已停用。", status_code=503, headers=headers)
@@ -42,7 +39,9 @@ class Monitoring:
             # No await within collection: all runtime/telemetry mutations run
             # on the same event loop, so these fields share one consistent view.
             payload = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "routing": routing_snapshot(manager),
+                **failure_snapshot(),
                 "sampled_at": datetime.now(timezone.utc).isoformat(),
                 "window": {"hours": 24, "max_turns_per_instance": 100},
                 "instances": instance_monitor_snapshots(manager),

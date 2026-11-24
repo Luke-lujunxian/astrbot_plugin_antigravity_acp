@@ -14,12 +14,12 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 from .config import Settings
 from .errors import AgyError
-from .media import prepare_media
+from .media import ImageFingerprints, prepare_media
 from .messages import digest, normalize
 from .paths import plugin_data_root
 from .sessions import Runtime
 from .system_prompt import filter_host_capabilities
-from .telemetry import TurnMeter, safe_context, safe_label
+from .telemetry import TurnMeter, provider_tag, safe_context, safe_label
 from .tool_turn import chat_events
 from .tools import ToolSnapshot
 
@@ -139,7 +139,7 @@ def instance_monitor_snapshots(manager) -> list[dict]:
                 latest_context["source"] = "acp_usage_update"
         history_now = inst.runtime.telemetry.clock() if active else None
         rows.append({
-            "provider_id": safe_label(provider_id), "model": model,
+            "provider_id": safe_label(provider_id), "provider_tag": provider_tag(provider_id), "model": model,
             "enabled": bool(merged.get("enable")),
             "tools_mode": tools_mode, "effective_mode": "tools" if effective_tools else "chat",
             "tools_enabled": bool(effective_tools),
@@ -239,6 +239,7 @@ class AgyProvider(Provider):
         namespace = digest(self.provider_id)[:16]
         root = plugin_data_root(Path(get_astrbot_plugin_data_path())) / namespace
         self.runtime = Runtime(self.settings, root)
+        self.image_fingerprints = ImageFingerprints()
         self.warned_tools = False
         _instances.add(self)
 
@@ -283,7 +284,8 @@ class AgyProvider(Provider):
         **kwargs,
     ) -> LLMResponse:
         final = None
-        stream = self.text_chat_stream(
+        stream = self._chat_responses(
+            False,
             prompt=prompt,
             session_id=session_id,
             image_urls=image_urls,
@@ -324,6 +326,34 @@ class AgyProvider(Provider):
         request_max_retries=None,
         **kwargs,
     ) -> AsyncIterator[LLMResponse]:
+        responses = self._chat_responses(
+            True, prompt, session_id, image_urls, audio_urls, func_tool, contexts,
+            system_prompt, tool_calls_result, model, extra_user_content_parts,
+            tool_choice, request_max_retries, **kwargs,
+        )
+        try:
+            async for response in responses:
+                yield response
+        finally:
+            await responses.aclose()
+
+    async def _chat_responses(
+        self,
+        streaming,
+        prompt=None,
+        session_id=None,
+        image_urls=None,
+        audio_urls=None,
+        func_tool=None,
+        contexts=None,
+        system_prompt=None,
+        tool_calls_result=None,
+        model=None,
+        extra_user_content_parts=None,
+        tool_choice="auto",
+        request_max_retries=None,
+        **kwargs,
+    ) -> AsyncIterator[LLMResponse]:
         conversation_id = kwargs.get("conversation_id")
         key = (
             digest([session_id, conversation_id])
@@ -339,6 +369,7 @@ class AgyProvider(Provider):
         extra = self.provider_config.get("custom_extra_body") or {}
         provider_mode = extra.get("agy_tools_mode", "inherit")
         selected = str(model or self.get_model() or "")
+        diagnostic_model = selected if selected == self.get_model() or selected in self.runtime.model_cache else ""
         effort_raw = kwargs.get(
             "agy_thought_level", extra.get("agy_thought_level", "default")
         )
@@ -357,10 +388,14 @@ class AgyProvider(Provider):
         claimed_half_open: tuple[str, str] | None = None
         snapshot = ToolSnapshot(None)
         request = None
-        continuation = False
+        continuation = bool(tool_calls_result)
         request_fingerprint: str | None = None
 
         try:
+            raw_contexts = self._ensure_message_to_dicts(contexts) or []
+            continuation = continuation or bool(
+                prompt is None and raw_contexts and raw_contexts[-1].get("role") == "tool"
+            )
             if approver is not None and not inspect.iscoroutinefunction(approver):
                 raise AgyError(
                     "TOOL_CONTEXT", "agy_tool_approver 必须为异步宿主审批回调。"
@@ -394,14 +429,13 @@ class AgyProvider(Provider):
                 raise AgyError(
                     "TOOL_CONTEXT", "工具调用需要宿主会话身份及 abort_signal 生命周期。"
                 )
-            raw_contexts = self._ensure_message_to_dicts(contexts) or []
             raw_contexts, parts = await await_or_abort(
                 prepare_media(
                     raw_contexts,
                     prompt,
                     extra_user_content_parts,
                     image_urls,
-                    self.settings,
+                    self.settings, cache=self.image_fingerprints, scope=key,
                 ),
                 signal,
             )
@@ -503,13 +537,16 @@ class AgyProvider(Provider):
                     provider=self.provider_id,
                     session_key_raw=key,
                     mode="tools" if snapshot.tools else "chat",
-                    model=selected,
+                    model=diagnostic_model,
                     effort=effort,
                     system_bytes=request.system_bytes,
                     system_hash8=(request.system_hash or "")[:8],
                     transient_bytes=len((request.transient_data or "").encode()),
                     tool_schema_bytes=snapshot.schema_bytes,
                 )
+
+            if logical_request_id and meter.logical_request_tag is None:
+                meter.logical_request_tag = self.runtime.telemetry.opaque_tag(logical_request_id)
 
             if not continuation and not is_existing_turn:
                 guard_check = await self.runtime.failure_guard.check(
@@ -537,9 +574,6 @@ class AgyProvider(Provider):
                 claimed_half_open = guard_check.half_open_scope
         except BaseException as exc:
             self.runtime.failure_guard.release_probe(claimed_half_open)
-            if isinstance(exc, AgyError) and meter is not None and meter.tool_calls:
-                exc.no_retry = True
-                exc.no_fallback = True
             cancelled = isinstance(exc, asyncio.CancelledError)
             code = exc.code if isinstance(exc, AgyError) else ("CANCELLED" if cancelled else "CONFIG")
             if meter is None:
@@ -547,9 +581,13 @@ class AgyProvider(Provider):
                     provider=self.provider_id,
                     session_key_raw=key,
                     mode="tools" if snapshot.tools else "chat",
-                    model=selected,
-                    effort=effort if isinstance(effort, str) else "default",
+                    model=diagnostic_model,
+                    effort=effort if isinstance(effort, str) and effort in {"low", "medium", "high", "default"} else "",
                 )
+            if continuation:
+                meter.tool_result_supplied = True
+            if meter.replay_blocked and isinstance(exc, AgyError):
+                exc.no_retry = exc.no_fallback = True
             if not meter.finished:
                 meter.finish(
                     status="cancelled" if cancelled else "error", error_code=code
@@ -557,6 +595,8 @@ class AgyProvider(Provider):
             if owns_existing_turn and self.runtime.turns.get(key) is existing_turn:
                 self.runtime.turns.pop(key, None)
                 await existing_turn.close()
+            if meter.replay_blocked and isinstance(exc, Exception) and not isinstance(exc, AgyError):
+                raise AgyError("UPSTREAM", "工具交接后失败，已停止本轮。", no_retry=True, no_fallback=True) from None
             raise
 
         if key is not None and not owns_existing_turn and not continuation:
@@ -624,6 +664,8 @@ class AgyProvider(Provider):
                 continuation=False,
                 claimed_half_open=claimed_half_open,
             )
+        if continuation:
+            meter.tool_result_supplied = True
         events = abortable(source, signal)
         text_parts, thoughts = [], []
         handed_off = False
@@ -633,11 +675,13 @@ class AgyProvider(Provider):
         try:
             async for event in events:
                 if event.kind == "text":
+                    meter.observe_chunk(event.kind, event.text, streaming=streaming)
                     text_parts.append(event.text)
                     yield LLMResponse(
                         role="assistant", completion_text=event.text, is_chunk=True
                     )
                 elif event.kind == "thought":
+                    meter.observe_chunk(event.kind, event.text, streaming=streaming)
                     thoughts.append(event.text)
                     yield LLMResponse(
                         role="assistant",
@@ -651,7 +695,7 @@ class AgyProvider(Provider):
                         (event.result or {}).get("omitted_messages", 0),
                     )
                 elif event.kind == "tools":
-                    handed_off = True
+                    handed_off = meter.tool_handed_off = True
                     call = event.result["call"]
                     yield LLMResponse(
                         role="assistant",
@@ -678,6 +722,8 @@ class AgyProvider(Provider):
                         usage=token_usage(result),
                         is_chunk=False,
                     )
+            if not done_seen and not handed_off:
+                raise AgyError("EMPTY", "AGY 未返回最终响应。")
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 exit_status = "cancelled"
@@ -687,20 +733,28 @@ class AgyProvider(Provider):
                 exit_code = exc.code
                 # Surface an explicit failure after partial delivery. Neither
                 # this provider nor callers honoring no_retry may replay it.
-                if text_parts or thoughts or handed_off or meter.tool_calls:
+                if meter.replay_blocked:
                     exc.no_retry = True
                     exc.no_fallback = True
             else:
                 exit_status = "error"
                 exit_code = "UPSTREAM"
-                if isinstance(exc, Exception) and (text_parts or thoughts or handed_off or meter.tool_calls):
+                if isinstance(exc, Exception) and meter.replay_blocked:
                     raise AgyError(
                         "UPSTREAM", "本轮已输出内容或交接工具后失败；已停止，禁止自动重放。",
                         no_retry=True, no_fallback=True,
                     ) from None
             raise
         finally:
-            await events.aclose()
+            try:
+                await events.aclose()
+            except Exception as exc:
+                if meter.replay_blocked:
+                    if isinstance(exc, AgyError):
+                        exc.no_retry = exc.no_fallback = True
+                        raise
+                    raise AgyError("UPSTREAM", "结束已交付回合时失败。", no_retry=True, no_fallback=True) from None
+                raise
             if not handed_off and not done_seen and not meter.finished:
                 self.runtime.failure_guard.release_probe(claimed_half_open)
                 meter.finish(status=exit_status, error_code=exit_code)

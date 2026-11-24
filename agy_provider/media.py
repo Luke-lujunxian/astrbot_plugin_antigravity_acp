@@ -16,11 +16,13 @@ import ssl
 import stat
 import struct
 import zlib
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 
 from .errors import AgyError
+from .messages import digest
 
 MIMES = {"image/png", "image/jpeg"}
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -198,7 +200,7 @@ def validate_image(data: bytes, declared: str | None, settings) -> dict:
     return {"type": "image", "mimeType": mime, "data": base64.b64encode(data).decode()}
 
 
-def _local(source: str, settings) -> bytes:
+def _local(source: str, settings, *, metadata_only=False):
     path = Path(source)
     if not path.is_absolute() or ".." in path.parts:
         raise _error("IMAGE_PATH", "图片须位于已授权媒体目录，不允许路径穿越。")
@@ -222,12 +224,15 @@ def _local(source: str, settings) -> bytes:
             raise _error("IMAGE_PATH", "图片必须为普通文件。")
         if info.st_size > settings.image_max_bytes:
             raise _error("IMAGE_BYTES", "图片超过字节预算。")
+        stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if metadata_only:
+            return stamp
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = None
             data = stream.read(settings.image_max_bytes + 1)
         if len(data) > settings.image_max_bytes:
             raise _error("IMAGE_BYTES", "图片超过字节预算。")
-        return data
+        return data, stamp
     except (OSError, ValueError):
         raise _error("IMAGE_PATH", "图片不可读或路径包含符号链接。") from None
     finally:
@@ -407,9 +412,35 @@ async def _download(source, settings):
         raise _error("IMAGE_DOWNLOAD", "图片下载失败或响应不完整。") from None
 
 
+def _local_source(source):
+    if source.startswith("file:"):
+        parsed = urlsplit(source)
+        if parsed.netloc or parsed.query or parsed.fragment:
+            raise _error("IMAGE_PATH", "文件 URL 不允许主机、查询或片段。")
+        return unquote(parsed.path)
+    if "://" in source:
+        raise _error("IMAGE_URL", "不支持此图片 URL 协议。")
+    return source
+
+
+class ImageFingerprints:
+    """Bounded process memory. Keys and values contain no URLs, paths or media."""
+    def __init__(self):
+        self.entries = OrderedDict()
+
+    def remember(self, key, identity):
+        self.entries[key] = identity
+        self.entries.move_to_end(key)
+        if len(self.entries) > 512:
+            self.entries.popitem(last=False)
+
+
 class _Images:
-    def __init__(self, settings):
+    def __init__(self, settings, cache, scope):
         self.settings = settings
+        self.cache = cache
+        self.scope = scope
+        self.history = {}
         self.sources = {}
         self.unique = {}
         self.byte_count = 0
@@ -427,6 +458,7 @@ class _Images:
         # Bound source strings before parsing/decoding allocation.
         if len(source) > self.settings.image_max_bytes * 4 // 3 + 256:
             raise _error("IMAGE_BYTES", "图片超过字节预算。")
+        cache_key = self._key(source, declared)
         if declared is not None:
             try:
                 data = base64.b64decode(source, validate=True)
@@ -446,14 +478,8 @@ class _Images:
         elif source.startswith(("https://", "http://")):
             data, declared = await _download(source, self.settings)
         else:
-            if source.startswith("file:"):
-                parsed = urlsplit(source)
-                if parsed.netloc or parsed.query or parsed.fragment:
-                    raise _error("IMAGE_PATH", "文件 URL 不允许主机、查询或片段。")
-                source = unquote(parsed.path)
-            elif "://" in source:
-                raise _error("IMAGE_URL", "不支持此图片 URL 协议。")
-            data = await asyncio.to_thread(_local, source, self.settings)
+            data, stamp = await asyncio.to_thread(_local, _local_source(source), self.settings)
+            cache_key = (cache_key, stamp)
         block = validate_image(data, declared, self.settings)
         identity = hashlib.sha256(data).digest()
         if identity not in self.unique:
@@ -464,10 +490,43 @@ class _Images:
                 raise _error("IMAGE_BYTES", "图片总量超过字节预算。")
             self.unique[identity] = block
         block = self.unique[identity]
+        self.cache.remember(cache_key, digest(block))
         self.sources[key] = block
         return block
 
-    async def parts(self, value, *, allow_images=True):
+    def _key(self, source, declared):
+        return (self.scope, declared, hashlib.sha256(source.encode("utf-8", "surrogatepass")).digest())
+
+    async def historical(self, source, declared):
+        if not isinstance(source, str):
+            raise _error()
+        key = self._key(source, declared)
+        if key in self.history:
+            return self.history[key]
+        stamp = None
+        identity = None
+        try:
+            if declared is None and not source.startswith(("data:", "http://", "https://")):
+                stamp = await asyncio.to_thread(_local, _local_source(source), self.settings, metadata_only=True)
+            elif declared is None and source.startswith(("http://", "https://")):
+                _url(source)  # syntax only; historical URLs never initiate DNS/HTTP
+            identity = self.cache.entries.get((key, stamp) if stamp is not None else key)
+            if identity is None and len(source) <= self.settings.image_max_bytes * 4 // 3 + 256:
+                if declared is not None:
+                    identity = digest({"type": "image", "mimeType": declared, "data": source})
+                elif source.startswith("data:"):
+                    meta, sep, encoded = source.partition(",")
+                    if sep and meta.endswith(";base64") and meta[5:-7] in MIMES:
+                        identity = digest({"type": "image", "mimeType": meta[5:-7], "data": encoded})
+        except (AgyError, OSError, ValueError):
+            pass
+        # An absent canonical image still has an opaque, non-sendable identity.
+        identity = identity or digest(["reference", key[-1].hex(), declared, stamp])
+        part = {"type": "historical_image", "image_sha256": identity}
+        self.history[key] = part
+        return part
+
+    async def parts(self, value, *, allow_images=True, historical=False):
         if not isinstance(value, list):
             return value
         result, seen = [], set()
@@ -483,15 +542,16 @@ class _Images:
             if kind == "image_url":
                 item = part.get("image_url")
                 source = item.get("url") if isinstance(item, dict) else None
-                part = await self.block(source)
+                part = await self.historical(source, None) if historical else await self.block(source)
             elif kind == "image":
                 if not isinstance(part.get("mimeType"), str):
                     raise _error("IMAGE_MIME", "图片块缺少 MIME。")
-                part = await self.block(part.get("data"), part["mimeType"])
+                load = self.historical if historical else self.block
+                part = await load(part.get("data"), part["mimeType"])
             elif kind not in {"text", "think"}:
                 raise _error("UNSUPPORTED", "音频、视频、PDF 及未知内容块尚未支持。")
-            if part.get("type") == "image":
-                identity = part["data"]
+            if part.get("type") in {"image", "historical_image"}:
+                identity = part.get("image_sha256") or part["data"]
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -513,24 +573,26 @@ def _merge_parts(left, right):
     return left
 
 
-async def prepare_media(contexts, prompt, extra_parts, image_urls, settings):
+async def prepare_media(contexts, prompt, extra_parts, image_urls, settings, *, cache=None, scope=None):
     """Return copied contexts/extra parts with canonical ACP image blocks.
 
     The caller still owns text/history normalization. Content hashes include the
-    canonical base64 bytes, so replacing a file at the same path changes history.
-    No attachment cache survives this invocation and no original file is removed.
+    verified image fingerprint or an opaque historical source descriptor.
+    Only digests of previously verified sources survive this invocation.
     In contexts-only calls only extra images are merged, since AstrBot has already
     assembled text parts. Repeated images within a turn are sent once.
     """
-    images = _Images(settings)
+    images = _Images(settings, cache if cache is not None and scope else ImageFingerprints(), scope)
     normalized = []
-    for raw in contexts or []:
+    contexts = contexts or []
+    for index, raw in enumerate(contexts):
         message = raw.model_dump() if hasattr(raw, "model_dump") else raw
         if not isinstance(message, dict):
             raise _error("INPUT", "消息必须为对象。")
         message = dict(message)
         message["content"] = await images.parts(
-            message.get("content"), allow_images=message.get("role") == "user"
+            message.get("content"), allow_images=message.get("role") == "user",
+            historical=prompt is not None or index != len(contexts) - 1,
         )
         normalized.append(message)
     extras = await images.parts(extra_parts or [])
@@ -558,11 +620,11 @@ async def prepare_media(contexts, prompt, extra_parts, image_urls, settings):
                 )
                 content = latest_user.get("content") if latest_user else None
                 known = (
-                    {part["data"] for part in content if part.get("type") == "image"}
+                    {part["image_sha256"] for part in content if part.get("type") == "historical_image"}
                     if isinstance(content, list)
                     else set()
                 )
-                if any(part["data"] not in known for part in additions):
+                if any(digest(part) not in known for part in additions):
                     raise _error("INPUT", "工具续轮不能附加新的图片。")
         extras = []
     return normalized, extras

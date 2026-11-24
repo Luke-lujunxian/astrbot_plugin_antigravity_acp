@@ -15,6 +15,7 @@ from .agy_provider.errors import AgyError
 from .agy_provider.host_compat import install_host_compat, uninstall_host_compat
 from .agy_provider.onboarding import Onboarding, ensure_provider_source, next_step
 from .agy_provider.monitoring import Monitoring
+from .agy_provider.routing import routing_snapshot
 from .agy_provider.paths import cleanup_stale_dirs, plugin_data_root
 from .agy_provider.provider import (
     DEFAULT_CONFIG,
@@ -26,7 +27,7 @@ from .agy_provider.provider import (
     instance_cost_snapshots,
     terminate_all,
 )
-from .agy_provider.telemetry import format_cost_report
+from .agy_provider.telemetry import format_cost_report, start_diagnostics, stop_diagnostics
 
 RESTORE_IDS = "_sl251_agy_provider_restore_ids"
 
@@ -169,6 +170,7 @@ class AgyProviderPlugin(Star):
                     key: value for key, value in self.setup_service.report.items()
                     if key not in {"models", "efforts", "selected_model"}
                 }
+                report["routing"] = routing_snapshot(self.context.provider_manager)
             finally:
                 self.doctor_task = None
         yield event.plain_result(
@@ -231,6 +233,7 @@ class AgyProviderPlugin(Star):
             "已注册 agy_acp。打开插件详情 → 首次设置，或发送 /agy setup 开始引导。"
         )
         self.stopping = False
+        start_diagnostics(plugin_data_root())
         self.setup_service = Onboarding(self.context, settings)
         self.setup_service.register()
         self.monitor_service = Monitoring(self.context)
@@ -270,6 +273,7 @@ class AgyProviderPlugin(Star):
             setattr(manager, RESTORE_IDS, restore_ids)
             await terminate_all()
         finally:
+            stop_diagnostics()
             uninstall_host_compat()
             unregister_owned_adapter()
             self.registered = False
