@@ -315,7 +315,7 @@ class FailureEventsAndReadOnlyTests(unittest.IsolatedAsyncioTestCase):
                 "SECRET_TOOL_PARAM",
                 "ya29.SECRET_OAUTH_TOKEN",
                 "https://oauth.example/cb?code=AUTH_CODE_XYZ",
-                "http://user:PROXY_PASS_SECRET@127.0.0.1:8080",
+                "http://user:pass@example.invalid:8080",
             ]
             journal.append({
                 "provider": "acp-main",

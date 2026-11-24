@@ -188,7 +188,7 @@ CI 流程（[.github/workflows/test.yml](../.github/workflows/test.yml)）在 `u
 1. **`useDashboardState.ts` `monitorPending` ref 误用（阻塞监控轮询 + TS2588）**：`refreshMonitor` 守卫与赋值、`pauseRefresh` 重置全部修正为 `monitorPending.value`，保持对外返回 ref 契约不变。
 2. **`MonitorCharts.vue` 空值收窄（TS18047）**：`rebuildReasons` 及 Token 计算改用局部可选变量，避免 `props.summary` 为 `null` 时的类型报错，不使用非空断言。
 3. **`diagnostics.ts` 空值收窄（TS18047）**：`failure_events`、`failure_retention`、`window` 改用局部可选变量收窄，保持严格白名单不导出 `csrf`/`ticket`/`code`/`url`。
-4. **文档敏感扫描误报**：`docs/acp-30-frontend-handoff.md` 第 16 行由 `pkg@x.y.z` 改为 `` `pkg` (`x.y.z`) ``，保留精确版本号且不触发邮箱正则，未改动扫描器或白名单。
+4. **文档敏感扫描误报**：`docs/acp-30-frontend-handoff.md` 第 16 行由「包名@版本」类邮箱形态改为「包名 (版本)」表格形式，保留精确版本号且不触发邮箱正则，未改动扫描器或白名单。
 5. **上游完整许可文本补齐**：从实际安装依赖原样引入 `LICENSES/vue.txt`、`LICENSES/vuetify.txt`、`LICENSES/outfit.txt`、`LICENSES/mdi.txt`，并在 `THIRD_PARTY_NOTICES.md` 与本文档建立显式链接。
 
 ### 5.1 待 Hydrogen / QA 验证步骤
