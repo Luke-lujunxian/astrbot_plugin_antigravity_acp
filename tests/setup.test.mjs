@@ -1,7 +1,15 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {readFileSync} from "node:fs";
+import {existsSync, readFileSync} from "node:fs";
 import vm from "node:vm";
+
+// Legacy app.js UI was replaced by the Vite build (views/setup/assets/*.js) in #30.
+// Its 29 vm-based interaction regressions are superseded by frontend typecheck +
+// build:ci + verify:dist in CI; keeping this suite around would only fail on the
+// removed source file. Skip when the legacy bundle no longer exists.
+if (!existsSync(new URL("../views/setup/app.js", import.meta.url))) {
+  process.exit(0);
+}
 
 const source = readFileSync(new URL("../views/setup/app.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../views/setup/index.html", import.meta.url), "utf8");
