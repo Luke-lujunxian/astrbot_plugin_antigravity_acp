@@ -1,5 +1,12 @@
 # 变更记录
 
+## 未发布（分支 feat/ui-redesign）
+
+- **WebUI 重构：对齐 AstrBot 官方设计系统**：令牌取自 dashboard 的 PurpleTheme / PurpleThemeDark，并优先继承宿主注入的 `--astrbot-color-*`；平面卡片、细边框、20px 大圆角、tonal 胶囊与按钮。手动主题切换改写 `data-theme-mode`，`data-theme` 留给宿主同步。
+- **监控概览可视化**：每个实例概览新增会话池分段占用条、近 24h 成功/失败环形图、会话复用率与缓存读取占比环形图、上下文占用进度条、Token 构成堆叠条、请求耗时柱状图（含均值参考线与失败高亮）；会话重建原因改为横向条形图；异常以顶部横幅提示。
+- **设置进度条**：新增「运行环境 → 账号认证 → 模型配置 → 启用实例」四步进度，自动标出已完成与当前步骤。
+- **精简**：移除帮助弹窗、范围标签、占位与免责文案及 Telemetry 原始字段组；无数据的图表与空状态整块不渲染。后端 Python 零改动。
+
 ## 0.7.3（正式发布，2026-11-18）
 
 - **修复 Python 3.12+ 工具桥关闭死锁与 Windows 目录释放竞态（PR #22）**：Python 3.12.1+ 中 `asyncio.Server.wait_closed()` 会等待所有活跃客户端连接协程退出后才返回；`ToolBroker._close()` 调整为先关闭监听、取消待处理调用 `future` 与连接任务并 `gather`，最后再 `await server.wait_closed()`，消除工具交接后取消或插件停用时阻塞至 `tool_execution_timeout`（默认 120s）的死锁。同时新增 `remove_tree_robust()` 有界重试并在 Windows 无 Job Object 且前端进程先退出时仍执行 `taskkill /T`，消除后代进程 `cwd` 句柄短暂延迟释放引发的 `WinError 32`。

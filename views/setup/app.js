@@ -45,11 +45,10 @@ function formatFaultBrief(code) {
 function applyTheme() {
   const root = document.documentElement;
   if (!root) return;
+  // 手动模式写入 data-theme-mode；data-theme 保留给宿主主题同步
+  root.dataset.themeMode = themeMode;
   if (themeMode === "light" || themeMode === "dark") {
-    root.dataset.theme = themeMode;
     nextManualTheme = themeMode === "dark" ? "light" : "dark";
-  } else if (root.dataset) {
-    delete root.dataset.theme;
   }
   const labels = {auto: "主题：自动", light: "主题：浅色", dark: "主题：深色"};
   const btn = $("theme-toggle");
@@ -139,14 +138,6 @@ function kvItem(label, value) {
   return item;
 }
 
-function overviewMetric(label, value, sub, valueTone = "") {
-  const item = el("div", "monitor-metric");
-  const dd = el("dd", valueTone ? `tone-${valueTone}` : "", value);
-  item.append(el("dt", "", label), dd);
-  if (sub) item.append(el("p", "monitor-metric-sub", sub));
-  return item;
-}
-
 function createLayerDetails(storeKey, kindClass, title, badgeText) {
   const details = el("details", `monitor-layer ${kindClass}`);
   if (expandedMonitorSections.has(storeKey)) details.open = true;
@@ -161,49 +152,149 @@ function createLayerDetails(storeKey, kindClass, title, badgeText) {
   return details;
 }
 
-function renderGaugeTile(label, rate, subText, emptyLabel, strokeColor) {
-  const tile = el("div", "monitor-gauge");
-  const valid = Number.isFinite(rate);
+const RING_R = 15;
+const RING_C = 2 * Math.PI * RING_R;
+
+function ringSvg(rate, strokeColor) {
   const svg = svgNode("svg", {class: "gauge-svg", viewBox: "0 0 40 40", "aria-hidden": "true"});
-  const trackAttrs = {cx: 20, cy: 20, r: 15, fill: "none", stroke: "var(--chart-track)", "stroke-width": 4.5};
-  if (!valid) trackAttrs["stroke-dasharray"] = "3 3";
-  svg.append(svgNode("circle", trackAttrs));
+  const valid = Number.isFinite(rate);
+  svg.append(svgNode("circle", {
+    cx: 20, cy: 20, r: RING_R, fill: "none", stroke: "var(--chart-track)", "stroke-width": 4.5,
+    ...(valid ? {} : {"stroke-dasharray": "3 3"}),
+  }));
   if (valid) {
-    const circumference = 2 * Math.PI * 15;
     const clamped = Math.max(0, Math.min(1, rate));
     svg.append(svgNode("circle", {
-      cx: 20, cy: 20, r: 15, fill: "none",
-      stroke: strokeColor, "stroke-width": 4.5, "stroke-linecap": "round",
-      "stroke-dasharray": `${(clamped * circumference).toFixed(2)} ${circumference.toFixed(2)}`,
+      cx: 20, cy: 20, r: RING_R, fill: "none", stroke: strokeColor, "stroke-width": 4.5, "stroke-linecap": "round",
+      "stroke-dasharray": `${(clamped * RING_C).toFixed(2)} ${RING_C.toFixed(2)}`,
       transform: "rotate(-90 20 20)",
     }));
   }
-  const info = el("div", "gauge-info");
-  info.append(
-    el("span", "gauge-label", label),
-    el("span", "gauge-value", valid ? monitorPercent(rate) : emptyLabel),
-  );
-  if (subText) info.append(el("span", "gauge-sub", subText));
-  tile.append(svg, info);
+  return svg;
+}
+
+// 环形占比卡片：复用率 / 缓存命中
+function renderRingTile(label, rate, subText, emptyLabel, strokeColor) {
+  const tile = el("div", "kpi");
+  const valid = Number.isFinite(rate);
+  tile.append(el("span", "kpi-label", label));
+  const wrap = el("div", "ring-wrap");
+  wrap.append(ringSvg(rate, strokeColor), el("span", "ring-value", valid ? monitorPercent(rate) : "—"));
+  tile.append(wrap);
+  const note = valid ? subText : emptyLabel;
+  if (note) tile.append(el("span", "kpi-sub", note));
   return tile;
 }
 
+// 会话池：分段占用条
+function renderPoolTile(pool) {
+  const tile = el("div", "kpi");
+  tile.append(el("span", "kpi-label", "活动会话"));
+  if (!pool) {
+    tile.append(el("span", "kpi-value", "未知"));
+    return tile;
+  }
+  tile.append(el("span", "kpi-value", `${monitorCount(pool.active_sessions)} / ${monitorCount(pool.max_sessions)}`));
+  if (Number.isFinite(pool.active_sessions) && Number.isFinite(pool.max_sessions) && pool.max_sessions > 0) {
+    const segments = Math.min(pool.max_sessions, 12);
+    const ratio = Math.min(1, pool.active_sessions / pool.max_sessions);
+    let filled = Math.round(ratio * segments);
+    if (pool.active_sessions > 0) filled = Math.max(1, filled);
+    const gap = 2;
+    const width = 120;
+    const segW = (width - gap * (segments - 1)) / segments;
+    const svg = svgNode("svg", {
+      class: "seg-svg", viewBox: `0 0 ${width} 8`, preserveAspectRatio: "none", "aria-hidden": "true",
+    });
+    for (let i = 0; i < segments; i++) {
+      svg.append(svgNode("rect", {
+        x: (i * (segW + gap)).toFixed(2), y: 0, width: segW.toFixed(2), height: 8, rx: 2,
+        fill: i < filled ? (ratio >= 0.9 ? "var(--warn)" : "var(--accent)") : "var(--chart-track)",
+      }));
+    }
+    tile.append(svg);
+  }
+  tile.append(el("span", "kpi-sub", pool ? `存活进程 ${monitorCount(pool.live_processes)} · 续轮 ${monitorCount(pool.active_tool_turns)}` : ""));
+  return tile;
+}
+
+// 近 24h 请求：成功 / 失败环形图
+function renderRequestsTile(summary) {
+  const tile = el("div", "kpi");
+  tile.append(el("span", "kpi-label", "近 24h 请求"));
+  const total = Number.isFinite(summary?.total_turns) ? summary.total_turns : 0;
+  const success = Number.isFinite(summary?.success_turns) ? summary.success_turns : 0;
+  const failed = Number.isFinite(summary?.failed_turns) ? summary.failed_turns : 0;
+  const wrap = el("div", "ring-wrap");
+  const svg = svgNode("svg", {class: "donut-svg", viewBox: "0 0 40 40", "aria-hidden": "true"});
+  svg.append(svgNode("circle", {cx: 20, cy: 20, r: RING_R, fill: "none", stroke: "var(--chart-track)", "stroke-width": 4.5}));
+  if (total > 0) {
+    let cursor = 0;
+    [[success, "var(--chart-cached)"], [failed, "var(--error)"]].forEach(([count, color]) => {
+      if (count <= 0) return;
+      const len = Math.min(count / total, 1) * RING_C;
+      svg.append(svgNode("circle", {
+        cx: 20, cy: 20, r: RING_R, fill: "none", stroke: color, "stroke-width": 4.5,
+        "stroke-dasharray": `${len.toFixed(2)} ${(RING_C - len).toFixed(2)}`,
+        "stroke-dashoffset": (-cursor).toFixed(2),
+        transform: "rotate(-90 20 20)",
+      }));
+      cursor += len;
+    });
+  }
+  wrap.append(svg, el("span", "ring-value", summary ? monitorCount(total) : "—"));
+  tile.append(wrap);
+  if (summary && total > 0) {
+    const split = el("div", "kpi-split");
+    split.append(el("span", "kpi-sub", "成功 / 失败"), el("span", failed > 0 ? "kpi-strong tone-warn" : "kpi-strong", `${monitorCount(success)} / ${monitorCount(failed)}`));
+    tile.append(split);
+    const sent = summary.request_sent_turns;
+    if (Number.isFinite(sent) && sent !== total) tile.append(el("span", "kpi-sub", `实际发送 ${monitorCount(sent)}`));
+  } else {
+    tile.append(el("span", "kpi-sub", summary ? "暂无样本" : "未知"));
+  }
+  return tile;
+}
+
+function renderContextPanel(context, row) {
+  const panel = el("div", "panel monitor-context");
+  const head = el("div", "panel-head");
+  head.append(el("span", "panel-title", "上下文占用"));
+  const valid = Number.isFinite(context.context_used) && Number.isFinite(context.context_window_size)
+    && context.context_window_size > 0 && context.context_used >= 0 && Boolean(context.observed_at);
+  if (valid) {
+    const ratio = context.context_used / context.context_window_size;
+    head.append(el("span", "panel-meta monitor-context-val", `${monitorCount(context.context_used)} / ${monitorCount(context.context_window_size)} Token · ${monitorPercent(ratio)}`));
+    const progress = el("progress", "monitor-progress");
+    progress.max = context.context_window_size;
+    progress.value = context.context_used;
+    if (ratio >= 0.9) progress.dataset.level = "high";
+    else if (ratio >= 0.7) progress.dataset.level = "warn";
+    progress.setAttribute("aria-label", "上下文占用");
+    panel.append(head, progress, el("p", "small", `${context.model || row.model} · 采样于 ${monitorTime(context.observed_at)}`));
+  } else {
+    head.append(el("span", "panel-meta monitor-context-val", "上游未报告"));
+    panel.append(head);
+  }
+  return panel;
+}
+
 function renderTokenChart(summary) {
-  const block = el("div", "chart-block");
   const reported = summary?.reported_usage_turns || 0;
   const missingCache = summary?.missing_cache_field_turns || 0;
-  const head = el("div", "chart-head");
-  head.append(el("span", "chart-title", "24h Token 构成"));
   if (reported <= 0) return null;
-  block.append(head);
 
   const other = Number.isFinite(summary.total_input_other) ? summary.total_input_other : 0;
   const hasCached = reported > missingCache && Number.isFinite(summary.total_input_cached);
   const cached = hasCached ? summary.total_input_cached : 0;
   const output = Number.isFinite(summary.total_output) ? summary.total_output : 0;
   const total = other + cached + output;
-
   if (total <= 0) return null;
+
+  const block = el("div", "panel chart-block");
+  const head = el("div", "panel-head");
+  head.append(el("span", "panel-title", "24h Token 构成"), el("span", "panel-meta", `已上报 ${reported} 轮`));
+  block.append(head);
 
   const width = 300;
   const parts = [
@@ -245,16 +336,17 @@ function renderTokenChart(summary) {
 }
 
 function renderLatencyChart(recent) {
-  const block = el("div", "chart-block");
   const timed = recent.slice().reverse().filter(turn => Number.isFinite(turn.elapsed_ms));
   if (!timed.length) return null;
-  const head = el("div", "chart-head");
-  head.append(el("span", "chart-title", `最近请求耗时（近 ${timed.length} 轮）`));
-
+  const block = el("div", "panel chart-block");
+  const head = el("div", "panel-head");
   const maxMs = Math.max(...timed.map(t => t.elapsed_ms), 1);
   const avgMs = Math.round(timed.reduce((sum, t) => sum + t.elapsed_ms, 0) / timed.length);
   const latestMs = timed[timed.length - 1].elapsed_ms;
-  head.append(el("span", "chart-meta", `最新 ${formatDuration(latestMs)} · 均值 ${formatDuration(avgMs)}`));
+  head.append(
+    el("span", "panel-title", `最近请求耗时（近 ${timed.length} 轮）`),
+    el("span", "panel-meta", `最新 ${formatDuration(latestMs)} · 均值 ${formatDuration(avgMs)}`),
+  );
   block.append(head);
 
   const width = 300;
@@ -262,8 +354,8 @@ function renderLatencyChart(recent) {
     class: "latency-svg", role: "img", viewBox: `0 0 ${width} 60`, preserveAspectRatio: "none",
     "aria-label": `最近 ${timed.length} 轮请求耗时分布，峰值 ${formatDuration(maxMs)}，均值 ${formatDuration(avgMs)}`,
   });
+  const avgY = 56 - Math.max(4, Math.round((avgMs / maxMs) * 50));
   svg.append(
-    svgNode("line", {x1: 0, y1: 29, x2: width, y2: 29, stroke: "var(--line)", "stroke-dasharray": "2 3", "stroke-width": 1}),
     svgNode("line", {x1: 0, y1: 56, x2: width, y2: 56, stroke: "var(--line)", "stroke-width": 1}),
   );
 
@@ -279,6 +371,8 @@ function renderLatencyChart(recent) {
     rect.append(svgNode("title", {}, `${formatDuration(turn.elapsed_ms)} · ${statusText}${turn.error_code ? ` (${turn.error_code})` : ""} · ${monitorAgo(turn.recorded_at)}`));
     svg.append(rect);
   });
+  // 均值参考线
+  svg.append(svgNode("line", {x1: 0, y1: avgY, x2: width, y2: avgY, stroke: "var(--muted)", "stroke-dasharray": "3 3", "stroke-width": 1, opacity: 0.7}));
   block.append(svg);
 
   const axis = el("div", "chart-axis");
@@ -287,229 +381,210 @@ function renderLatencyChart(recent) {
   return block;
 }
 
+// 会话重建原因：横向条形图
+function renderReasonBars(reasons) {
+  const block = el("div", "panel chart-block");
+  const head = el("div", "panel-head");
+  const total = reasons.reduce((sum, [, count]) => sum + (Number.isFinite(count) ? count : 0), 0);
+  head.append(el("span", "panel-title", "会话重建原因 (24h)"), el("span", "panel-meta", `合计 ${monitorCount(total)} 次`));
+  block.append(head);
+  const top = reasons.slice(0, 8);
+  const max = Math.max(...top.map(([, count]) => (Number.isFinite(count) ? count : 0)), 1);
+  const list = el("div", "reason-bars");
+  top.forEach(([reason, count]) => {
+    const row = el("div", "reason-row");
+    row.append(el("span", "reason-label", `${rebuildReasonLabels[reason] || reason} × ${monitorCount(count)}`));
+    const svg = svgNode("svg", {class: "reason-svg", viewBox: "0 0 100 6", preserveAspectRatio: "none", "aria-hidden": "true"});
+    svg.append(
+      svgNode("rect", {x: 0, y: 0, width: 100, height: 6, rx: 3, fill: "var(--chart-track)"}),
+      svgNode("rect", {x: 0, y: 0, width: Math.max(3, ((Number.isFinite(count) ? count : 0) / max) * 100).toFixed(1), height: 6, rx: 3, fill: "var(--accent)"}),
+    );
+    row.append(svg);
+    list.append(row);
+  });
+  block.append(list);
+  return block;
+}
+
+function renderHistory(recent, row) {
+  const block = el("div", "panel chart-block");
+  const head = el("div", "panel-head");
+  head.append(el("span", "panel-title", "历史请求记录"), el("span", "panel-meta", `近 ${recent.length} 轮`));
+  const list = el("ul", "turn-list");
+  recent.forEach(turn => {
+    const item = el("li", "turn-row");
+    const top = el("div", "turn-row-top");
+    const statusLabel = turnStatusLabels[turn.status] || "未知";
+    const statusClass = turn.status === "ok" ? "tone-ok" : "tone-error";
+    top.append(
+      el("span", statusClass, `${statusLabel}${turn.error_code ? ` · ${turn.error_code}` : ""}`),
+      el("span", "small", `${turn.reused ? "复用" : "新建"} · ${formatDuration(turn.elapsed_ms)} · ${monitorAgo(turn.recorded_at)}`),
+    );
+    const meta = el("div", "turn-row-meta");
+    const usageText = turn.usage_status === "reported"
+      ? `入 ${monitorCount(turn.input_other)} · 缓存 ${turn.cache_fields_present?.cachedReadTokens ? monitorCount(turn.input_cached) : "未报告"} · 出 ${monitorCount(turn.output)}`
+      : turn.usage_status === "not_sent" ? "未发送请求" : "用量未报告";
+    meta.append(el("span", "", turn.model || row.model || "未知模型"), el("span", "", usageText));
+    item.append(top, meta);
+    list.append(item);
+  });
+  block.append(head, list);
+  return block;
+}
+
+function renderDiagnostics(row, recent, pool, idKey) {
+  const diagLayer = createLayerDetails(`${idKey}::diag`, "monitor-diag", "诊断");
+  const diagBody = el("div", "monitor-layer-body");
+
+  const providerGroup = el("div", "diag-group");
+  providerGroup.append(el("h4", "", "CLI 与 Provider 状态"));
+  const pKv = el("dl", "kv-list");
+  pKv.append(
+    kvItem("provider_id", row.provider_id || "未知"),
+    kvItem("runtime_state", `${row.runtime_state || "未知"} (${row.enabled ? "enabled" : "disabled"})`),
+    kvItem("tools_mode → effective", `${row.tools_mode || "inherit"} → ${row.effective_mode || "未知"} (tools_enabled=${String(row.tools_enabled)})`),
+    kvItem("pool", pool ? `active=${pool.active_sessions}/${pool.max_sessions}, live=${pool.live_processes}, tool_turns=${pool.active_tool_turns}` : "未初始化（无运行时）"),
+  );
+  if (state?.report) {
+    const rep = state.report;
+    pKv.append(
+      kvItem("CLI 状态与版本", `${rep.status || "未知"} (${stages[rep.stage] || rep.stage || "未知"}) · ${rep.cli_version || "未探测"}`),
+      kvItem("进程托管 / 工具桥", `${supervisionLabels[rep.process_supervision] || rep.process_supervision || "未知"} · ${transportLabels[rep.tool_bridge_transport] || rep.tool_bridge_transport || "未知"}`),
+    );
+  }
+  providerGroup.append(pKv);
+  diagBody.append(providerGroup);
+
+  const c429Turns = recent.filter(turn => turn.content_429_candidate);
+  if (c429Turns.length) {
+    const group = el("div", "diag-group");
+    group.append(el("h4", "", `429 候选 (${c429Turns.length})`));
+    const list = el("ul", "monitor-faults");
+    c429Turns.forEach(turn => {
+      const c = turn.content_429_candidate;
+      const item = el("li", "");
+      item.append(
+        el("code", "", `${turn.error_code || "429"} · hash=${c.system_hash8 || "未知"} · sys=${monitorCount(c.system_bytes)}B · attempt=${c.attempt ?? "未知"} · output=${c.has_output ? "是" : "否"}`),
+        el("span", "small", monitorTime(turn.recorded_at)),
+      );
+      list.append(item);
+    });
+    group.append(list);
+    diagBody.append(group);
+  }
+
+  const faultTurns = recent.filter(turn => turn.error_code || turn.status !== "ok");
+  if (faultTurns.length) {
+    const group = el("div", "diag-group");
+    group.append(el("h4", "", `异常记录 (${faultTurns.length})`));
+    const list = el("ul", "monitor-faults");
+    faultTurns.forEach(turn => {
+      const item = el("li", "");
+      const reasonsText = Array.isArray(turn.rebuild_reasons) && turn.rebuild_reasons.length ? turn.rebuild_reasons.join(",") : "none";
+      item.append(
+        el("code", "", `${turn.status}${turn.error_code ? `/${turn.error_code}` : ""} · ${formatDuration(turn.elapsed_ms)} · prompt=${monitorCount(turn.prompt_bytes)}B replay=${monitorCount(turn.replay_bytes)}B omit=${monitorCount(turn.omitted_messages)} · reasons=${reasonsText}`),
+        el("span", "small", monitorTime(turn.recorded_at)),
+      );
+      list.append(item);
+    });
+    group.append(list);
+    diagBody.append(group);
+  }
+
+  diagLayer.append(diagBody);
+  return diagLayer;
+}
+
 function renderMonitor(data) {
   if (data.schema_version !== 1 || !Array.isArray(data.instances)) throw new Error("monitor schema");
   const cards = data.instances.map(row => {
     const idKey = row.provider_id || "unknown";
     const card = el("article", "monitor-instance");
 
+    const recent = Array.isArray(row.recent_turns) ? row.recent_turns : [];
+    const pool = row.pool;
+    const summary = row.summary;
+    const context = row.latest_context || {};
+    const faults = recent.filter(turn => turn.error_code || turn.status === "error");
+
     const head = el("div", "monitor-instance-head");
     const idGroup = el("div", "monitor-id-group");
-    idGroup.append(
-      el("h3", "", row.provider_id),
-      el("p", "monitor-model", row.model || "未选择模型"),
-    );
+    idGroup.append(el("h3", "", row.provider_id), el("p", "monitor-model", row.model || "未选择模型"));
     const badges = el("div", "monitor-badges");
     const enabledBadge = el("span", "badge", row.enabled ? "已启用" : "已停用");
     if (row.enabled && row.runtime_state === "active") enabledBadge.dataset.state = "ready";
     const modeLabel = row.effective_mode === "tools" ? "工具模式" : row.effective_mode === "chat" ? "纯聊天" : "模式未知";
     badges.append(enabledBadge, el("span", "badge", modeLabel));
+    if (row.runtime_state === "active" && recent.length && !faults.length) {
+      const healthy = el("span", "badge", "近期无异常");
+      healthy.dataset.state = "ready";
+      badges.append(healthy);
+    }
     head.append(idGroup, badges);
     card.append(head);
-
-    const recent = Array.isArray(row.recent_turns) ? row.recent_turns : [];
-    const pool = row.pool;
-    const summary = row.summary;
-    const context = row.latest_context || {};
 
     if (row.runtime_state !== "active") {
       card.append(el("p", "monitor-empty", "已配置未初始化，暂无运行统计。"));
     } else {
-      // 第一层：运行概览（默认展开，紧凑双列布局）
       const overview = el("div", "monitor-overview");
 
-      const faults = recent.filter(turn => turn.error_code || turn.status === "error");
-      const grid = el("dl", "monitor-overview-grid");
-      const activeSub = pool ? `存活进程 ${monitorCount(pool.live_processes)} · 续轮 ${monitorCount(pool.active_tool_turns)}` : "";
-      const sentSub = summary && summary.request_sent_turns !== summary.total_turns ? `实际发送 ${monitorCount(summary.request_sent_turns)}` : "";
-      const failCount = summary?.failed_turns || 0;
-      const latestFaultText = faults.length
-        ? (faults[0].error_code ? formatFaultBrief(faults[0].error_code) : "请求异常")
-        : recent.length ? "近期无异常" : "暂无记录";
-      const latestFaultSub = faults.length
-        ? `${monitorAgo(faults[0].recorded_at)}${faults.length > 1 ? ` · 共 ${faults.length} 次` : ""}`
-        : "";
-
-      grid.append(
-        overviewMetric("活动会话", pool ? `${monitorCount(pool.active_sessions)} / ${monitorCount(pool.max_sessions)}` : "未知", activeSub),
-        overviewMetric("近 24h 请求", summary ? monitorCount(summary.total_turns) : "未知", sentSub),
-        overviewMetric("近 24h 成功 / 失败", summary ? `${monitorCount(summary.success_turns)} / ${monitorCount(summary.failed_turns)}` : "未知", "", failCount > 0 ? "warn" : ""),
-        overviewMetric("最近异常", latestFaultText, latestFaultSub, faults.length ? "error" : ""),
-      );
-      overview.append(grid);
-
-      // 上下文占用
-      const contextBox = el("div", "monitor-context");
-      const ctxHead = el("div", "monitor-context-head");
-      const ctxTitle = el("div", "monitor-context-title");
-      ctxTitle.append(el("span", "", "上下文占用"));
-      const validContext = Number.isFinite(context.context_used) && Number.isFinite(context.context_window_size)
-        && context.context_window_size > 0 && context.context_used >= 0 && Boolean(context.observed_at);
-
-      if (validContext) {
-        const ratio = context.context_used / context.context_window_size;
-        ctxHead.append(ctxTitle, el("span", "monitor-context-val", `${monitorCount(context.context_used)} / ${monitorCount(context.context_window_size)} Token · ${monitorPercent(ratio)}`));
-        const progress = el("progress", "monitor-progress");
-        progress.max = context.context_window_size;
-        progress.value = context.context_used;
-        if (ratio >= 0.9) progress.dataset.level = "high";
-        else if (ratio >= 0.7) progress.dataset.level = "warn";
-        progress.setAttribute("aria-label", "最近采样的存活会话上下文占用");
-        contextBox.append(ctxHead, progress, el("p", "small", `${context.model || row.model} · 采样于 ${monitorTime(context.observed_at)}`));
-      } else {
-        ctxHead.append(ctxTitle, el("span", "monitor-context-val", "上游未报告"));
-        contextBox.append(ctxHead);
+      if (faults.length) {
+        const banner = el("div", "fault-banner");
+        const label = faults[0].error_code ? formatFaultBrief(faults[0].error_code) : "请求异常";
+        banner.append(
+          el("strong", "", label),
+          el("span", "", `${monitorAgo(faults[0].recorded_at)}${faults.length > 1 ? ` · 近期共 ${faults.length} 次` : ""}`),
+        );
+        overview.append(banner);
       }
-      overview.append(contextBox);
-      card.append(overview);
 
-      // 第二层：详细统计（按需展开）
-      const detailsBadge = summary && summary.total_turns > 0 ? `${monitorCount(summary.total_turns)} 轮` : "暂无样本";
-      const layer2 = createLayerDetails(`${idKey}::details`, "monitor-details", "详细统计与图表", detailsBadge);
-      const layer2Body = el("div", "monitor-layer-body");
-
-      layer2Body.append(...[renderTokenChart(summary)].filter(Boolean));
-
-      const gauges = el("div", "monitor-gauges");
       const sentTurns = summary?.request_sent_turns || 0;
-      const reuseEmpty = sentTurns === 0 ? "暂无样本" : "未知";
       const missingCache = summary?.missing_cache_field_turns || 0;
       const reportedTurns = summary?.reported_usage_turns || 0;
-      const cacheEmpty = reportedTurns > 0 && reportedTurns === missingCache ? "未报告缓存字段" : "暂无样本";
-      gauges.append(
-        renderGaugeTile(
-          "会话复用率 (24h)",
+      const grid = el("div", "kpi-grid");
+      grid.append(
+        renderPoolTile(pool),
+        renderRequestsTile(summary),
+        renderRingTile(
+          "会话复用率",
           summary?.reuse_rate,
           sentTurns > 0 ? `基于 ${monitorCount(sentTurns)} 次实际发送` : "",
-          reuseEmpty,
+          sentTurns === 0 ? "暂无样本" : "未知",
           "var(--chart-input)",
         ),
-        renderGaugeTile(
-          "缓存读取占比 (24h)",
+        renderRingTile(
+          "缓存读取占比",
           summary?.cache_token_ratio,
           missingCache > 0 ? `${monitorCount(missingCache)} 轮缺缓存字段` : "",
-          cacheEmpty,
+          reportedTurns > 0 && reportedTurns === missingCache ? "未报告缓存字段" : "暂无样本",
           "var(--chart-cached)",
         ),
       );
-      layer2Body.append(gauges);
+      overview.append(grid);
+
+      const panels = el("div", "panel-row");
+      panels.append(renderContextPanel(context, row));
+      const tokenChart = renderTokenChart(summary);
+      if (tokenChart) panels.append(tokenChart);
+      overview.append(panels);
+
       const latencyChart = renderLatencyChart(recent);
-      if (latencyChart) layer2Body.append(latencyChart);
+      if (latencyChart) overview.append(latencyChart);
+      card.append(overview);
 
-      // 会话重建原因
       const reasons = Array.isArray(summary?.rebuild_reasons) ? summary.rebuild_reasons : [];
-      if (reasons.length) {
-        const rebuildBlock = el("div", "chart-block");
-        const rebuildHead = el("div", "chart-head");
-        rebuildHead.append(el("span", "chart-title", "会话重建原因 (24h)"));
-        const reasonTotal = reasons.reduce((sum, [, count]) => sum + (Number.isFinite(count) ? count : 0), 0);
-        rebuildHead.append(el("span", "chart-meta", `合计 ${monitorCount(reasonTotal)} 次`));
-        const chips = el("div", "reason-chips");
-        reasons.slice(0, 8).forEach(([reason, count]) => {
-          chips.append(el("span", "reason-chip", `${rebuildReasonLabels[reason] || reason} × ${monitorCount(count)}`));
-        });
-        rebuildBlock.append(rebuildHead, chips);
-        layer2Body.append(rebuildBlock);
+      if (reasons.length || recent.length) {
+        const detailsBadge = recent.length ? `${monitorCount(recent.length)} 轮` : "";
+        const layer2 = createLayerDetails(`${idKey}::details`, "monitor-details", "详细记录", detailsBadge);
+        const layer2Body = el("div", "monitor-layer-body");
+        if (reasons.length) layer2Body.append(renderReasonBars(reasons));
+        if (recent.length) layer2Body.append(renderHistory(recent, row));
+        layer2.append(layer2Body);
+        card.append(layer2);
       }
-
-      // 历史请求记录
-      if (recent.length) {
-        const historyBlock = el("div", "chart-block");
-        const historyHead = el("div", "chart-head");
-        historyHead.append(
-          el("span", "chart-title", "历史请求记录"),
-          el("span", "chart-meta", `近 ${recent.length} 轮`),
-        );
-        const list = el("ul", "turn-list");
-        recent.forEach(turn => {
-          const item = el("li", "turn-row");
-          const top = el("div", "turn-row-top");
-          const statusLabel = turnStatusLabels[turn.status] || "未知";
-          const statusClass = turn.status === "ok" ? "tone-ok" : "tone-error";
-          const left = el("span", statusClass, `${statusLabel}${turn.error_code ? ` · ${turn.error_code}` : ""}`);
-          const right = el("span", "small", `${turn.reused ? "复用" : "新建"} · ${formatDuration(turn.elapsed_ms)} · ${monitorAgo(turn.recorded_at)}`);
-          top.append(left, right);
-
-          const meta = el("div", "turn-row-meta");
-          const usageText = turn.usage_status === "reported"
-            ? `入 ${monitorCount(turn.input_other)} · 缓存 ${turn.cache_fields_present?.cachedReadTokens ? monitorCount(turn.input_cached) : "未报告"} · 出 ${monitorCount(turn.output)}`
-            : turn.usage_status === "not_sent" ? "未发送请求" : "用量未报告";
-          meta.append(el("span", "", turn.model || row.model || "未知模型"), el("span", "", usageText));
-          item.append(top, meta);
-          list.append(item);
-        });
-        historyBlock.append(historyHead, list);
-        layer2Body.append(historyBlock);
-      }
-
-      layer2.append(layer2Body);
-      card.append(layer2);
     }
 
-    // 第三层：诊断（默认折叠）
-    const diagLayer = createLayerDetails(`${idKey}::diag`, "monitor-diag", "诊断");
-    const diagBody = el("div", "monitor-layer-body");
-
-    // 1. CLI 与 Provider 状态
-    const providerGroup = el("div", "diag-group");
-    providerGroup.append(el("h4", "", "CLI 与 Provider 状态"));
-    const pKv = el("dl", "kv-list");
-    pKv.append(
-      kvItem("provider_id", row.provider_id || "未知"),
-      kvItem("runtime_state", `${row.runtime_state || "未知"} (${row.enabled ? "enabled" : "disabled"})`),
-      kvItem("tools_mode → effective", `${row.tools_mode || "inherit"} → ${row.effective_mode || "未知"} (tools_enabled=${String(row.tools_enabled)})`),
-      kvItem("pool", pool ? `active=${pool.active_sessions}/${pool.max_sessions}, live=${pool.live_processes}, tool_turns=${pool.active_tool_turns}` : "未初始化（无运行时）"),
-    );
-    if (state?.report) {
-      const rep = state.report;
-      pKv.append(
-        kvItem("CLI 状态与版本", `${rep.status || "未知"} (${stages[rep.stage] || rep.stage || "未知"}) · ${rep.cli_version || "未探测"}`),
-        kvItem("进程托管 / 工具桥", `${supervisionLabels[rep.process_supervision] || rep.process_supervision || "未知"} · ${transportLabels[rep.tool_bridge_transport] || rep.tool_bridge_transport || "未知"}`),
-      );
-    }
-    providerGroup.append(pKv);
-    diagBody.append(providerGroup);
-
-    // 2. 429 候选（仅有记录时显示）
-    const c429Turns = recent.filter(turn => turn.content_429_candidate);
-    if (c429Turns.length) {
-      const c429Group = el("div", "diag-group");
-      c429Group.append(el("h4", "", `429 候选 (${c429Turns.length})`));
-      const list = el("ul", "monitor-faults");
-      c429Turns.forEach(turn => {
-        const c = turn.content_429_candidate;
-        const item = el("li", "");
-        item.append(
-          el("code", "", `${turn.error_code || "429"} · hash=${c.system_hash8 || "未知"} · sys=${monitorCount(c.system_bytes)}B · attempt=${c.attempt ?? "未知"} · output=${c.has_output ? "是" : "否"}`),
-          el("span", "small", monitorTime(turn.recorded_at)),
-        );
-        list.append(item);
-      });
-      c429Group.append(list);
-      diagBody.append(c429Group);
-    }
-
-    // 3. 异常记录（仅有记录时显示）
-    const faultTurns = recent.filter(turn => turn.error_code || turn.status !== "ok");
-    if (faultTurns.length) {
-      const faultGroup = el("div", "diag-group");
-      faultGroup.append(el("h4", "", `异常记录 (${faultTurns.length})`));
-      const list = el("ul", "monitor-faults");
-      faultTurns.forEach(turn => {
-        const item = el("li", "");
-        const reasonsText = Array.isArray(turn.rebuild_reasons) && turn.rebuild_reasons.length ? turn.rebuild_reasons.join(",") : "none";
-        item.append(
-          el("code", "", `${turn.status}${turn.error_code ? `/${turn.error_code}` : ""} · ${formatDuration(turn.elapsed_ms)} · prompt=${monitorCount(turn.prompt_bytes)}B replay=${monitorCount(turn.replay_bytes)}B omit=${monitorCount(turn.omitted_messages)} · reasons=${reasonsText}`),
-          el("span", "small", monitorTime(turn.recorded_at)),
-        );
-        list.append(item);
-      });
-      faultGroup.append(list);
-      diagBody.append(faultGroup);
-    }
-    diagLayer.append(diagBody);
-    card.append(diagLayer);
-
+    card.append(renderDiagnostics(row, recent, pool, idKey));
     return card;
   });
 
@@ -521,6 +596,21 @@ function renderMonitor(data) {
   monitorSnapshot = data;
 }
 
+function renderSetupProgress(data, passed) {
+  const configured = data.providers || [];
+  const steps = [
+    ["运行环境", Boolean(data.report.cli_version)],
+    ["账号认证", passed],
+    ["模型配置", configured.length > 0],
+    ["启用实例", configured.some(p => p.enabled)],
+  ];
+  const current = steps.findIndex(([, done]) => !done);
+  $("setup-progress").replaceChildren(...steps.map(([label, done], index) => {
+    const item = el("li", done ? "is-done" : index === current ? "is-current" : "");
+    item.append(el("span", "step-dot", done ? "✓" : String(index + 1)), el("span", "step-label", label));
+    return item;
+  }));
+}
 async function refreshMonitor() {
   clearTimeout(monitorTimer);
   if (disposed || document.hidden || monitorPending || !monitorReady) return;
@@ -562,6 +652,7 @@ function render(data) {
   else if (!busy) cachedModels = [];
   const models = cachedModels;
 
+  renderSetupProgress(data, passed);
   $("connection").textContent = busy ? "正在同步…" : "已连接 AstrBot";
   $("environment").textContent = `${data.environment.system} · Python ${data.environment.python}${data.environment.container ? " · 容器环境" : ""}`;
   $("discovery-hint").textContent = data.environment.discovery_hint || "";

@@ -78,12 +78,12 @@ async function boot(initial = base()) {
 test("theme toggle switches light and dark theme on documentElement", async () => {
   const ui = await boot();
   ui.get("theme-toggle").onclick();
-  assert.equal(ui.doc.documentElement.dataset.theme, "dark");
+  assert.equal(ui.doc.documentElement.dataset.themeMode, "dark");
   assert.equal(ui.get("theme-toggle").textContent, "主题：深色");
   ui.get("theme-toggle").onclick();
   assert.equal(ui.get("theme-toggle").textContent, "主题：自动");
   ui.get("theme-toggle").onclick();
-  assert.equal(ui.doc.documentElement.dataset.theme, "light");
+  assert.equal(ui.doc.documentElement.dataset.themeMode, "light");
   assert.equal(ui.get("theme-toggle").textContent, "主题：浅色");
 });
 
@@ -372,13 +372,18 @@ test("monitor renders 3-layer hierarchy, SVG charts, 429 candidates, and keeps o
     assert.equal(overviewTexts.some(t => t.includes(forbidden)), false, `Overview exposed internal field ${forbidden}`);
   }
 
+  const overviewNodes = collectNodes(overview);
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("token-stack-svg")));
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("latency-svg")));
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("donut-svg")));
+  assert.ok(overviewNodes.some(n => n.tag === "svg" && n.classList.contains("seg-svg")));
+  assert.equal(overviewNodes.filter(n => n.tag === "svg" && n.classList.contains("gauge-svg")).length, 2);
+  assert.ok(overviewTexts.includes("75.0%"));
+  assert.ok(overviewTexts.includes("60.0%"));
+
   const layer2Nodes = collectNodes(layer2);
   const layer2Texts = layer2Nodes.map(n => n.textContent).filter(Boolean);
-  assert.ok(layer2Nodes.some(n => n.tag === "svg" && n.classList.contains("token-stack-svg")));
-  assert.ok(layer2Nodes.some(n => n.tag === "svg" && n.classList.contains("latency-svg")));
-  assert.equal(layer2Nodes.filter(n => n.tag === "svg" && n.classList.contains("gauge-svg")).length, 2);
-  assert.ok(layer2Texts.includes("75.0%"));
-  assert.ok(layer2Texts.includes("60.0%"));
+  assert.ok(layer2Nodes.some(n => n.tag === "svg" && n.classList.contains("reason-svg")));
   assert.ok(layer2Texts.some(t => t.includes("冷启动 × 2")));
 
   const layer3Texts = collectNodes(layer3).map(n => n.textContent).filter(Boolean);
@@ -416,10 +421,12 @@ test("monitor distinguishes genuine 0.0% reuse rate from missing/null data and r
   ui.api.renderMonitor(payload);
 
   const [activeCard, idleCard] = ui.get("monitor-instances").children;
-  const activeLayer2Texts = collectNodes(activeCard.children.find(n => n.classList.contains("monitor-details"))).map(n => n.textContent).filter(Boolean);
-  assert.ok(activeLayer2Texts.includes("0.0%"));
-  assert.ok(activeLayer2Texts.includes("未报告缓存字段"));
-  assert.ok(activeLayer2Texts.some(t => t.includes("缓存读取 上游未报告")));
+  const activeOverviewTexts = collectNodes(activeCard.children.find(n => n.className === "monitor-overview")).map(n => n.textContent).filter(Boolean);
+  assert.ok(activeOverviewTexts.includes("0.0%"));
+  assert.ok(activeOverviewTexts.includes("未报告缓存字段"));
+  assert.ok(activeOverviewTexts.some(t => t.includes("缓存读取 上游未报告")));
+  // 无重建原因且无历史记录时不渲染空的详细记录层
+  assert.equal(activeCard.children.some(n => n.classList.contains("monitor-details")), false);
 
   const idleTexts = collectNodes(idleCard).map(n => n.textContent).filter(Boolean);
   assert.ok(idleTexts.some(t => t.includes("已配置未初始化")));
@@ -431,4 +438,22 @@ test("stylesheet and HTML enforce mobile overflow safety and system dark theme s
   assert.match(css, /@media\s*\(prefers-color-scheme:\s*dark\)/);
   assert.match(css, /minmax\(min\(100%,\s*360px\),\s*1fr\)/);
   assert.match(css, /overflow-wrap:\s*anywhere/);
+});
+
+test("setup progress stepper reflects environment, login, model and enabled instance", async () => {
+  const none = await boot(base());
+  const items = () => none.get("setup-progress").children;
+  assert.deepEqual(items().map(li => li.className), ["is-done", "is-done", "is-current", ""]);
+  assert.equal(items()[0].children[0].textContent, "✓");
+  assert.equal(items()[2].children[0].textContent, "3");
+
+  const done = base();
+  done.providers = [{id: "inst-1", model: "gemini-test", tools_mode: "chat", enabled: true}];
+  none.api.render(done);
+  assert.deepEqual(items().map(li => li.className), ["is-done", "is-done", "is-done", "is-done"]);
+
+  const blocked = base();
+  blocked.report = {status: "blocked", error_code: "NOT_INSTALLED"};
+  none.api.render(blocked);
+  assert.deepEqual(items().map(li => li.className), ["is-current", "", "", ""]);
 });

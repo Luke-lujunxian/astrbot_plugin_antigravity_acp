@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme-mode="auto">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -31,6 +31,7 @@
           <h2 id="monitor-heading">运行监控</h2>
         </div>
         <div class="card-head-actions">
+          <span id="monitor-updated" class="small"></span>
           <span id="monitor-badge" class="badge">正在加载</span>
           <button id="monitor-refresh" class="btn btn-sm" type="button" disabled>刷新</button>
         </div>
@@ -38,9 +39,10 @@
       <div class="card-body">
         <p id="monitor-message" class="hint-text" role="status">正在读取…</p>
         <div id="monitor-instances" class="monitor-instances"></div>
-        <p id="monitor-updated" class="small"></p>
       </div>
     </section>
+
+    <ol id="setup-progress" class="setup-progress" aria-label="设置进度"></ol>
 
     <div class="grid">
       <!-- 01 运行环境 -->
