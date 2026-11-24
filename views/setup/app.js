@@ -5,7 +5,6 @@ let state, pending = false, disposed = false, timer, revision = 0, cachedModels 
 let themeMode = "auto", nextManualTheme = "dark";
 let monitorTimer, monitorPending = false, monitorReady = false, monitorSnapshot, reportDiagSignature = "";
 const expandedMonitorSections = new Set();
-const fallbackPopovers = [];
 
 const activeLogin = (login) => login.busy;
 const stages = {
@@ -60,31 +59,6 @@ function applyTheme() {
 function cycleTheme() {
   themeMode = themeMode === "auto" ? nextManualTheme : "auto";
   applyTheme();
-}
-
-function wireHelpPopover(btnId, popId) {
-  const btn = $(btnId), pop = $(popId);
-  if (!btn || !pop) return;
-  const hasNative = typeof HTMLElement !== "undefined" && Object.hasOwn(HTMLElement.prototype, "popover");
-  if (hasNative) {
-    pop.addEventListener("toggle", event => {
-      btn.setAttribute("aria-expanded", String(event.newState === "open"));
-    });
-  } else {
-    pop.hidden = true;
-    fallbackPopovers.push({btn, pop});
-    btn.addEventListener("click", () => {
-      const open = pop.hidden;
-      for (const item of fallbackPopovers) {
-        item.pop.hidden = true;
-        item.pop.classList?.remove("is-open");
-        item.btn.setAttribute("aria-expanded", "false");
-      }
-      pop.hidden = !open;
-      pop.classList?.toggle("is-open", open);
-      btn.setAttribute("aria-expanded", String(open));
-    });
-  }
 }
 
 function badge(id, text, kind = "") {
@@ -165,12 +139,10 @@ function kvItem(label, value) {
   return item;
 }
 
-function overviewMetric(label, scope, value, sub, valueTone = "") {
+function overviewMetric(label, value, sub, valueTone = "") {
   const item = el("div", "monitor-metric");
-  const dt = el("dt", "");
-  dt.append(el("span", "", label), el("span", "scope-pill", scope));
   const dd = el("dd", valueTone ? `tone-${valueTone}` : "", value);
-  item.append(dt, dd);
+  item.append(el("dt", "", label), dd);
   if (sub) item.append(el("p", "monitor-metric-sub", sub));
   return item;
 }
@@ -219,20 +191,11 @@ function renderGaugeTile(label, rate, subText, emptyLabel, strokeColor) {
 function renderTokenChart(summary) {
   const block = el("div", "chart-block");
   const reported = summary?.reported_usage_turns || 0;
-  const unavailable = summary?.unavailable_usage_turns || 0;
   const missingCache = summary?.missing_cache_field_turns || 0;
   const head = el("div", "chart-head");
-  head.append(
-    el("span", "chart-title", "24h Token 构成"),
-    el("span", "chart-meta", reported > 0 ? `已上报 ${reported} 轮` : "近 24h"),
-  );
+  head.append(el("span", "chart-title", "24h Token 构成"));
+  if (reported <= 0) return null;
   block.append(head);
-
-  if (reported <= 0) {
-    const note = unavailable > 0 ? `暂无已上报用量（${unavailable} 轮上游未报告）` : "暂无已上报 Token 用量";
-    block.append(el("p", "chart-empty", note));
-    return block;
-  }
 
   const other = Number.isFinite(summary.total_input_other) ? summary.total_input_other : 0;
   const hasCached = reported > missingCache && Number.isFinite(summary.total_input_cached);
@@ -240,10 +203,7 @@ function renderTokenChart(summary) {
   const output = Number.isFinite(summary.total_output) ? summary.total_output : 0;
   const total = other + cached + output;
 
-  if (total <= 0) {
-    block.append(el("p", "chart-empty", "已上报轮次用量为 0"));
-    return block;
-  }
+  if (total <= 0) return null;
 
   const width = 300;
   const parts = [
@@ -287,13 +247,9 @@ function renderTokenChart(summary) {
 function renderLatencyChart(recent) {
   const block = el("div", "chart-block");
   const timed = recent.slice().reverse().filter(turn => Number.isFinite(turn.elapsed_ms));
+  if (!timed.length) return null;
   const head = el("div", "chart-head");
-  head.append(el("span", "chart-title", `最近请求耗时${timed.length ? `（近 ${timed.length} 轮）` : ""}`));
-
-  if (!timed.length) {
-    block.append(head, el("p", "chart-empty", "暂无耗时采样"));
-    return block;
-  }
+  head.append(el("span", "chart-title", `最近请求耗时（近 ${timed.length} 轮）`));
 
   const maxMs = Math.max(...timed.map(t => t.elapsed_ms), 1);
   const avgMs = Math.round(timed.reduce((sum, t) => sum + t.elapsed_ms, 0) / timed.length);
@@ -361,18 +317,6 @@ function renderMonitor(data) {
     } else {
       // 第一层：运行概览（默认展开，紧凑双列布局）
       const overview = el("div", "monitor-overview");
-      const scopeBar = el("div", "monitor-scope-bar");
-      const scopePills = el("div", "scope-pills");
-      scopePills.append(
-        el("span", "scope-pill", "实时会话池"),
-        el("span", "scope-pill", "近 24h (≤100轮)"),
-        el("span", "scope-pill", "最近采样"),
-      );
-      scopeBar.append(scopePills);
-      if (recent.length) {
-        scopeBar.append(el("span", "", `最近一轮 ${monitorAgo(recent[0].recorded_at)}`));
-      }
-      overview.append(scopeBar);
 
       const faults = recent.filter(turn => turn.error_code || turn.status === "error");
       const grid = el("dl", "monitor-overview-grid");
@@ -387,18 +331,18 @@ function renderMonitor(data) {
         : "";
 
       grid.append(
-        overviewMetric("活动会话", "实时", pool ? `${monitorCount(pool.active_sessions)} / ${monitorCount(pool.max_sessions)}` : "未知", activeSub),
-        overviewMetric("请求轮数", "近 24h", summary ? monitorCount(summary.total_turns) : "未知", sentSub),
-        overviewMetric("成功 / 失败", "近 24h", summary ? `${monitorCount(summary.success_turns)} / ${monitorCount(summary.failed_turns)}` : "未知", "", failCount > 0 ? "warn" : ""),
-        overviewMetric("最近异常", "近 20 轮", latestFaultText, latestFaultSub, faults.length ? "error" : ""),
+        overviewMetric("活动会话", pool ? `${monitorCount(pool.active_sessions)} / ${monitorCount(pool.max_sessions)}` : "未知", activeSub),
+        overviewMetric("近 24h 请求", summary ? monitorCount(summary.total_turns) : "未知", sentSub),
+        overviewMetric("近 24h 成功 / 失败", summary ? `${monitorCount(summary.success_turns)} / ${monitorCount(summary.failed_turns)}` : "未知", "", failCount > 0 ? "warn" : ""),
+        overviewMetric("最近异常", latestFaultText, latestFaultSub, faults.length ? "error" : ""),
       );
       overview.append(grid);
 
-      // 上下文占用（最近单次存活会话有效采样）
+      // 上下文占用
       const contextBox = el("div", "monitor-context");
       const ctxHead = el("div", "monitor-context-head");
       const ctxTitle = el("div", "monitor-context-title");
-      ctxTitle.append(el("span", "", "上下文占用"), el("span", "scope-pill", "最近采样"));
+      ctxTitle.append(el("span", "", "上下文占用"));
       const validContext = Number.isFinite(context.context_used) && Number.isFinite(context.context_window_size)
         && context.context_window_size > 0 && context.context_used >= 0 && Boolean(context.observed_at);
 
@@ -424,7 +368,7 @@ function renderMonitor(data) {
       const layer2 = createLayerDetails(`${idKey}::details`, "monitor-details", "详细统计与图表", detailsBadge);
       const layer2Body = el("div", "monitor-layer-body");
 
-      layer2Body.append(renderTokenChart(summary));
+      layer2Body.append(...[renderTokenChart(summary)].filter(Boolean));
 
       const gauges = el("div", "monitor-gauges");
       const sentTurns = summary?.request_sent_turns || 0;
@@ -449,14 +393,15 @@ function renderMonitor(data) {
         ),
       );
       layer2Body.append(gauges);
-      layer2Body.append(renderLatencyChart(recent));
+      const latencyChart = renderLatencyChart(recent);
+      if (latencyChart) layer2Body.append(latencyChart);
 
-      // 会话重建次数与原因
-      const rebuildBlock = el("div", "chart-block");
+      // 会话重建原因
       const reasons = Array.isArray(summary?.rebuild_reasons) ? summary.rebuild_reasons : [];
-      const rebuildHead = el("div", "chart-head");
-      rebuildHead.append(el("span", "chart-title", "会话重建原因 (24h)"));
       if (reasons.length) {
+        const rebuildBlock = el("div", "chart-block");
+        const rebuildHead = el("div", "chart-head");
+        rebuildHead.append(el("span", "chart-title", "会话重建原因 (24h)"));
         const reasonTotal = reasons.reduce((sum, [, count]) => sum + (Number.isFinite(count) ? count : 0), 0);
         rebuildHead.append(el("span", "chart-meta", `合计 ${monitorCount(reasonTotal)} 次`));
         const chips = el("div", "reason-chips");
@@ -464,19 +409,17 @@ function renderMonitor(data) {
           chips.append(el("span", "reason-chip", `${rebuildReasonLabels[reason] || reason} × ${monitorCount(count)}`));
         });
         rebuildBlock.append(rebuildHead, chips);
-      } else {
-        rebuildBlock.append(rebuildHead, el("p", "chart-empty", "暂无会话重建记录"));
+        layer2Body.append(rebuildBlock);
       }
-      layer2Body.append(rebuildBlock);
 
-      // 历史请求记录（最近 20 轮）
-      const historyBlock = el("div", "chart-block");
-      const historyHead = el("div", "chart-head");
-      historyHead.append(
-        el("span", "chart-title", "历史请求记录"),
-        el("span", "chart-meta", recent.length ? `近 ${recent.length} 轮` : "最近 20 轮"),
-      );
+      // 历史请求记录
       if (recent.length) {
+        const historyBlock = el("div", "chart-block");
+        const historyHead = el("div", "chart-head");
+        historyHead.append(
+          el("span", "chart-title", "历史请求记录"),
+          el("span", "chart-meta", `近 ${recent.length} 轮`),
+        );
         const list = el("ul", "turn-list");
         recent.forEach(turn => {
           const item = el("li", "turn-row");
@@ -496,17 +439,15 @@ function renderMonitor(data) {
           list.append(item);
         });
         historyBlock.append(historyHead, list);
-      } else {
-        historyBlock.append(historyHead, el("p", "chart-empty", "暂无历史请求记录"));
+        layer2Body.append(historyBlock);
       }
-      layer2Body.append(historyBlock);
 
       layer2.append(layer2Body);
       card.append(layer2);
     }
 
-    // 第三层：高级诊断（默认折叠）
-    const diagLayer = createLayerDetails(`${idKey}::diag`, "monitor-diag", "高级诊断", "原始字段与 429");
+    // 第三层：诊断（默认折叠）
+    const diagLayer = createLayerDetails(`${idKey}::diag`, "monitor-diag", "诊断");
     const diagBody = el("div", "monitor-layer-body");
 
     // 1. CLI 与 Provider 状态
@@ -529,11 +470,11 @@ function renderMonitor(data) {
     providerGroup.append(pKv);
     diagBody.append(providerGroup);
 
-    // 2. 429 诊断候选信息
+    // 2. 429 候选（仅有记录时显示）
     const c429Turns = recent.filter(turn => turn.content_429_candidate);
-    const c429Group = el("div", "diag-group");
-    c429Group.append(el("h4", "", `429 诊断候选信息 (${c429Turns.length})`));
     if (c429Turns.length) {
+      const c429Group = el("div", "diag-group");
+      c429Group.append(el("h4", "", `429 候选 (${c429Turns.length})`));
       const list = el("ul", "monitor-faults");
       c429Turns.forEach(turn => {
         const c = turn.content_429_candidate;
@@ -545,16 +486,14 @@ function renderMonitor(data) {
         list.append(item);
       });
       c429Group.append(list);
-    } else {
-      c429Group.append(el("p", "small", "近 20 轮无 429 候选记录"));
+      diagBody.append(c429Group);
     }
-    diagBody.append(c429Group);
 
-    // 3. 详细异常与 Telemetry 原始字段
+    // 3. 异常记录（仅有记录时显示）
     const faultTurns = recent.filter(turn => turn.error_code || turn.status !== "ok");
-    const faultGroup = el("div", "diag-group");
-    faultGroup.append(el("h4", "", `异常与调试记录 (${faultTurns.length})`));
     if (faultTurns.length) {
+      const faultGroup = el("div", "diag-group");
+      faultGroup.append(el("h4", "", `异常记录 (${faultTurns.length})`));
       const list = el("ul", "monitor-faults");
       faultTurns.forEach(turn => {
         const item = el("li", "");
@@ -566,24 +505,8 @@ function renderMonitor(data) {
         list.append(item);
       });
       faultGroup.append(list);
-    } else {
-      faultGroup.append(el("p", "small", "近 20 轮无异常或中断记录"));
+      diagBody.append(faultGroup);
     }
-    diagBody.append(faultGroup);
-
-    const teleGroup = el("div", "diag-group");
-    teleGroup.append(el("h4", "", "Telemetry 详细字段"));
-    const tKv = el("dl", "kv-list");
-    tKv.append(
-      kvItem("usage 覆盖 (24h)", summary ? `reported=${summary.reported_usage_turns}, unavailable=${summary.unavailable_usage_turns}, missing_cache=${summary.missing_cache_field_turns}` : "未初始化"),
-      kvItem("Token 汇总 (24h)", summary ? `other=${summary.total_input_other ?? "null"}, cached=${summary.total_input_cached ?? "null"}, output=${summary.total_output ?? "null"}` : "未初始化"),
-      kvItem("比率字段 (24h)", summary ? `reuse_rate=${monitorPercent(summary.reuse_rate)}, cache_token_ratio=${monitorPercent(summary.cache_token_ratio)}` : "未初始化"),
-      kvItem("latest_context", `source=${context.source || "not_reported"}, scope=${context.scope || "latest_live_session"}, used=${context.context_used ?? "null"}/${context.context_window_size ?? "null"}`),
-    );
-    teleGroup.append(tKv);
-    teleGroup.append(el("p", "small", "注：接口仅下发近 24h（≤100 轮）窗口统计与脱敏错误码（error_code），不含启动以来持久化累计及原始 CLI stderr/RPC 报文；深度排障请执行 /agy doctor。"));
-    diagBody.append(teleGroup);
-
     diagLayer.append(diagBody);
     card.append(diagLayer);
 
@@ -592,9 +515,9 @@ function renderMonitor(data) {
 
   $("monitor-instances").replaceChildren(...cards);
   $("monitor").dataset.stale = "false";
-  badge("monitor-badge", "本地快照", cards.length ? "ready" : "");
+  badge("monitor-badge", "正常", cards.length ? "ready" : "");
   $("monitor-message").textContent = cards.length ? "" : "尚未配置 AGY 实例，请在下方完成模型配置。";
-  $("monitor-updated").textContent = `快照 ${monitorShortTime(data.sampled_at)} · 10s 自动刷新`;
+  $("monitor-updated").textContent = `更新于 ${monitorShortTime(data.sampled_at)}`;
   monitorSnapshot = data;
 }
 
@@ -666,7 +589,6 @@ function render(data) {
     r.tool_bridge_transport ? kvItem("工具桥 / Socket", transportLabels[r.tool_bridge_transport] || "未知") : null,
     r.process_supervision ? kvItem("进程托管", supervisionLabels[r.process_supervision] || "未知") : null,
     r.proxy_mode ? kvItem("代理配置", `${r.proxy_mode}${data.environment.proxy_mode_note ? `（${data.environment.proxy_mode_note}）` : ""}`) : null,
-    r.cli_update_status ? kvItem("CLI 更新策略", "手动管理，不检查或覆盖全局 CLI") : null,
     r.auth_bridge !== undefined ? kvItem("认证桥接", r.auth_bridge ? "开启" : "关闭") : null,
     capSummary ? kvItem("ACP 能力声明", capSummary) : null,
   ].filter(Boolean));
@@ -774,8 +696,6 @@ async function action(name, body = {}) {
   }
 }
 
-wireHelpPopover("monitor-help-btn", "monitor-help");
-wireHelpPopover("model-help-btn", "model-help");
 $("theme-toggle").onclick = cycleTheme;
 $("monitor-refresh").onclick = refreshMonitor;
 $("check").onclick = () => action("check");
@@ -824,17 +744,6 @@ document.addEventListener("visibilitychange", () => {
   clearTimeout(monitorTimer);
   if (!document.hidden && !disposed) refreshMonitor();
 });
-
-if (fallbackPopovers.length) {
-  document.addEventListener("keydown", event => {
-    if (event.key !== "Escape") return;
-    for (const item of fallbackPopovers) {
-      item.pop.hidden = true;
-      item.pop.classList?.remove("is-open");
-      item.btn.setAttribute("aria-expanded", "false");
-    }
-  });
-}
 
 window.addEventListener("pagehide", () => {
   disposed = true;

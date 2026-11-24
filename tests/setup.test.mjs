@@ -299,10 +299,10 @@ test("passed environment streamlines main hints and moves technical facts to adv
   assert.ok(diagTexts.some(t => t.includes("Unix Socket")));
   assert.ok(diagTexts.some(t => t.includes("独立进程组")));
   assert.ok(diagTexts.some(t => t.includes("组件模式")));
-  assert.ok(diagTexts.some(t => t.includes("CLI 更新策略")));
+  assert.equal(diagTexts.some(t => t.includes("CLI 更新策略")), false);
 });
 
-test("save feedback avoids redundant placeholder text and help popovers toggle in fallback mode", async () => {
+test("save feedback avoids redundant placeholder text and the page has no help popovers", async () => {
   const saved = base();
   saved.providers = [{id: "inst-1", model: "gemini-test", tools_mode: "chat", enabled: true}];
   saved.result = {provider_id: "inst-1", default_selected: false};
@@ -314,13 +314,7 @@ test("save feedback avoids redundant placeholder text and help popovers toggle i
   ui.api.render(withDefault);
   assert.match(ui.get("finish-hint").textContent, /全局默认/);
 
-  assert.equal(ui.get("monitor-help").hidden, true);
-  ui.get("monitor-help-btn").click();
-  assert.equal(ui.get("monitor-help").hidden, false);
-  assert.equal(ui.get("monitor-help-btn").getAttribute("aria-expanded"), "true");
-  ui.handlers.keydown({key: "Escape"});
-  assert.equal(ui.get("monitor-help").hidden, true);
-  assert.equal(ui.get("monitor-help-btn").getAttribute("aria-expanded"), "false");
+  assert.doesNotMatch(html, /help-popover|popovertarget|scope-pill/);
 });
 
 test("monitor renders 3-layer hierarchy, SVG charts, 429 candidates, and keeps overview free of internal field names", async () => {
@@ -370,9 +364,8 @@ test("monitor renders 3-layer hierarchy, SVG charts, 429 candidates, and keeps o
   assert.ok(layer3 && layer3.open === false);
 
   const overviewTexts = collectNodes(overview).map(n => n.textContent).filter(Boolean);
-  assert.ok(overviewTexts.some(t => t === "实时会话池"));
   assert.ok(overviewTexts.some(t => t.includes("近 24h")));
-  assert.ok(overviewTexts.some(t => t === "最近采样"));
+  assert.equal(overviewTexts.some(t => t === "实时会话池" || t === "最近采样"), false);
   assert.ok(overviewTexts.some(t => t === "7 / 3"));
   assert.ok(overviewTexts.some(t => t.includes("RATE_LIMIT")));
   for (const forbidden of ["tools_mode", "effective_mode", "active_sessions", "total_input_other", "cachedReadTokens", "content_429_candidate"]) {
@@ -390,7 +383,7 @@ test("monitor renders 3-layer hierarchy, SVG charts, 429 candidates, and keeps o
 
   const layer3Texts = collectNodes(layer3).map(n => n.textContent).filter(Boolean);
   assert.ok(layer3Texts.some(t => t.includes("a1b2c3d4") && t.includes("2,048B")));
-  assert.ok(layer3Texts.some(t => t.includes("reported=7")));
+  assert.equal(layer3Texts.some(t => t.includes("reported=7")), false);
 
   // Preserving expanded <details> open state across refresh polls
   layer2.open = true;
