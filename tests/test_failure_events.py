@@ -370,8 +370,100 @@ class FailureEventsAndReadOnlyTests(unittest.IsolatedAsyncioTestCase):
         blocked_journal.append({"provider": "acp-main", "status": "error", "error_code": "UPSTREAM"})
         self.assertEqual(blocked_journal.snapshot()["failure_retention"]["storage_state"], "unavailable")
 
+    def _install_stub_scope(self):
+        """Install AstrBot module stubs (mirrors tests/test_main_init.py) and re-import agy_provider."""
+        import importlib
+        import importlib.util
+
+        # astrbot.api / astrbot.api.web already stubbed by module-level import / _install_web_and_entities_stubs
+        api_mod = sys.modules.get("astrbot.api") or types.ModuleType("astrbot.api")
+        sys.modules["astrbot.api"] = api_mod
+
+        def fake_command_group(*a, **kw):
+            def decorator(fn):
+                fn.command = lambda *ca, **ckw: (lambda f: f)
+                return fn
+
+            return decorator
+
+        filter_obj = types.SimpleNamespace(
+            command_group=fake_command_group,
+            permission_type=lambda *a, **kw: (lambda fn: fn),
+            PermissionType=types.SimpleNamespace(ADMIN="admin"),
+        )
+        event_mod = types.ModuleType("astrbot.api.event")
+        event_mod.AstrMessageEvent = object
+        event_mod.filter = filter_obj
+        star_mod = types.ModuleType("astrbot.api.star")
+        star_mod.Context = object
+        star_mod.Star = object
+        star_mod.register = lambda *a, **kw: (lambda cls: cls)
+        provider_api_mod = types.ModuleType("astrbot.api.provider")
+        provider_api_mod.LLMResponse = object
+        provider_api_mod.Provider = object
+        core_mod = types.ModuleType("astrbot.core")
+        core_provider_mod = sys.modules.get("astrbot.core.provider") or types.ModuleType("astrbot.core.provider")
+        core_provider_mod.register = lambda *a, **kw: None
+        entities_mod = sys.modules.get("astrbot.core.provider.entities") or types.ModuleType("astrbot.core.provider.entities")
+        if not hasattr(entities_mod, "TokenUsage"):
+            entities_mod.TokenUsage = dict
+        if not hasattr(entities_mod, "ProviderType"):
+            entities_mod.ProviderType = types.SimpleNamespace(CHAT_COMPLETION="chat_completion")
+        utils_mod = types.ModuleType("astrbot.core.utils")
+        path_mod = types.ModuleType("astrbot.core.utils.astrbot_path")
+        path_mod.get_astrbot_plugin_data_path = lambda: str(self.root)
+        agent_mod = types.ModuleType("astrbot.core.agent")
+        runners_mod = types.ModuleType("astrbot.core.agent.runners")
+        loop_mod = types.ModuleType("astrbot.core.agent.runners.tool_loop_agent_runner")
+        loop_mod.ToolLoopAgentRunner = object
+
+        repo_root = Path(__file__).resolve().parents[1]
+        pkg_name = "agy_failure_events_test_pkg"
+        pkg_mod = types.ModuleType(pkg_name)
+        pkg_mod.__path__ = [str(repo_root)]
+
+        stubs = {
+            "astrbot.api.event": event_mod,
+            "astrbot.api.star": star_mod,
+            "astrbot.api.provider": provider_api_mod,
+            "astrbot.core": core_mod,
+            "astrbot.core.provider": core_provider_mod,
+            "astrbot.core.provider.entities": entities_mod,
+            "astrbot.core.utils": utils_mod,
+            "astrbot.core.utils.astrbot_path": path_mod,
+            "astrbot.core.agent": agent_mod,
+            "astrbot.core.agent.runners": runners_mod,
+            "astrbot.core.agent.runners.tool_loop_agent_runner": loop_mod,
+            pkg_name: pkg_mod,
+        }
+        for name, mod in stubs.items():
+            self.saved_modules.setdefault(name, sys.modules.get(name))
+            sys.modules[name] = mod
+
+        # Re-import agy_provider submodules cleanly inside the patched sys.modules scope.
+        for name in list(sys.modules):
+            if name == "agy_provider" or name.startswith("agy_provider."):
+                self.saved_modules.setdefault(name, sys.modules.get(name))
+                sys.modules.pop(name, None)
+
+        agy_pkg = importlib.import_module("agy_provider")
+        sys.modules[f"{pkg_name}.agy_provider"] = agy_pkg
+        for sub in ("config", "errors", "host_compat", "onboarding", "provider", "routing", "paths", "monitoring", "_version"):
+            sys.modules[f"{pkg_name}.agy_provider.{sub}"] = importlib.import_module(
+                f"agy_provider.{sub}"
+            )
+
+        spec = importlib.util.spec_from_file_location(
+            f"{pkg_name}.main", repo_root / "main.py"
+        )
+        main_mod = importlib.util.module_from_spec(spec)
+        sys.modules[f"{pkg_name}.main"] = main_mod
+        spec.loader.exec_module(main_mod)
+        return main_mod
+
     async def test_b10_zero_generation_read_only_routes_auth_and_doctor(self):
         web_mod = _install_web_and_entities_stubs(self.saved_modules)
+        self._install_stub_scope()
         start_diagnostics(self.root)
 
         manager = _FakeManager()
@@ -452,7 +544,8 @@ class FailureEventsAndReadOnlyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mon_2["data"]["failure_events"][0]["error_code"], "RATE_LIMIT")
 
         # /agy doctor runs preflight check ONLY (no model prompt / text_chat generation) and includes routing
-        import main as main_module
+        # main already loaded via _install_stub_scope at test start (agy_provider.* re-imported under stubs)
+        main_module = sys.modules["agy_failure_events_test_pkg.main"]
 
         plugin = main_module.AgyProviderPlugin.__new__(main_module.AgyProviderPlugin)
         plugin.context = ctx
