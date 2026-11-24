@@ -49,6 +49,7 @@ flowchart LR
 
 - 稳定身份由 Provider 实例、AstrBot session、conversation 组成；缺少稳定身份不能冒用其他会话。工具请求还要求真实 ToolSet 和 `abort_signal` 生命周期；当活跃 `ToolTurn` 等待原调用方回填工具结果时，同一会话的其他并发新请求在 `queue_timeout` 内排队等待而不中断原工具轮。
 - `sessions.compare_history()` 比较 `host_expected` 与新宿主历史；`sent_window` 单独记录实际发送窗口。`exact`、`host_trim`、`rewrite`、`append_gap`、`unknown` 是诊断关系，不能把相同尾部当作安全复用证明。
+- AstrBot 原生 runner 发送的本轮用户文本块可带 `_no_save`。插件照常发送这些块，只在计算宿主预期回放时排除它们。如果宿主已将消息转成字典并丢失标记，插件仅在原始 `extra_user_content_parts` 全为文本且与组装位置、顺序和内容逐项吻合时恢复标记。无法确认的内容仍参与历史比较。复用期间，先前发给 ACP 的临时文本仍在该会话内。
 - `session_reuse_mode=strict` 为默认；`structured` 仅在 `messages.normalize()` 验证 `agy_context_parts` 后，把可信 transient 放入用户轮。无效/缺失分段不能升级为可信数据。模型、档位、稳定 system、工具指纹或历史语义变化可触发重建。
 - [context_usage.py](../agy_provider/context_usage.py) 连续比较同一窗口的可信 `used/size`。默认峰值至少 64000、当前值严格低于峰值 50% 时标记疑似压缩；先完成本轮及工具回填，再退休。缺失/无效字段及窗口切换中断比较，不能据此证明上游压缩或计算账单。
 - [provider.py](../agy_provider/provider.py) 在可见正文、工具交接或工具结果续轮后失败时设置 `no_retry`、`no_fallback`；[host_compat.py](../agy_provider/host_compat.py) 补足宿主后续 fallback 入口的约束。仅思考/进度且未交接工具的失败可保留显式 fallback 资格；输出前的去重/冷却仍可让宿主 fallback；不缓存成功答案，不自动续写或重放工具。

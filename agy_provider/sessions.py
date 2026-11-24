@@ -523,6 +523,7 @@ class Runtime:
                 context = request.prompt_context
                 if decision.reuse:
                     turn_index = session.turn_counter + 1
+                    sent_start = len(request.messages) - 1
                     prompt, omitted = prompt_blocks(
                         request.messages[-1:], self.settings.history_bytes
                     )
@@ -532,6 +533,7 @@ class Runtime:
                     prompt, omitted = prompt_blocks(
                         request.messages, self.settings.history_bytes
                     )
+                    sent_start = omitted
                     replay_bytes = sum(
                         len(block.get("text", "").encode())
                         for block in prompt
@@ -660,20 +662,23 @@ class Runtime:
                             assistant_hash = digest(
                                 {"role": "assistant", "content": answer}
                             )
-                            session.host_expected = request.hashes + [assistant_hash]
+                            sent_hashes = request.hashes
+                            session.host_expected = sent_hashes + [assistant_hash]
+                            if request.persisted_user is not None:
+                                index, persisted_hash = request.persisted_user
+                                session.host_expected[index] = persisted_hash
+                            # Include tool exchanges appended while the prompt was in flight.
+                            window_tail = sent_hashes[sent_start:] + [assistant_hash]
                             if decision.reuse and session.sent_window is not None:
-                                session.sent_window.hashes.extend(
-                                    [request.hashes[-1], assistant_hash]
-                                )
+                                session.sent_window.hashes.extend(window_tail)
                                 session.sent_window.window_hash = digest(
                                     session.sent_window.hashes
                                 )
                             else:
-                                sent_hashes = request.hashes[omitted:] + [assistant_hash]
                                 session.sent_window = SentWindow(
-                                    hashes=sent_hashes,
+                                    hashes=window_tail,
                                     omitted_messages=omitted,
-                                    window_hash=digest(sent_hashes),
+                                    window_hash=digest(window_tail),
                                 )
                             session.turn_counter = turn_index
                             session.had_transient = bool(

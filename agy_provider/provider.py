@@ -43,6 +43,68 @@ _settings = Settings()
 _instances: WeakSet = WeakSet()
 
 
+def _is_temporary(part):
+    if isinstance(part, dict):
+        return part.get("_no_save") is True
+    return getattr(part, "_no_save", False) is True
+
+
+def _temporary_extra_indices(content, extras):
+    """Match AstrBot's assembled [prompt?, *text_extras, *images] layout."""
+    if not isinstance(extras, list) or not any(_is_temporary(p) for p in extras):
+        return []
+    blocks = [p.model_dump() if hasattr(p, "model_dump") else p for p in extras]
+    if not all(isinstance(p, dict) and p.get("type") == "text" for p in blocks):
+        return []
+
+    texts = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            break
+        texts.append(part.get("text"))
+    if any(
+        not isinstance(p, dict) or p.get("type") not in {"image", "image_url"}
+        for p in content[len(texts) :]
+    ):
+        return []
+    offset = len(texts) - len(blocks)
+    if offset not in (0, 1) or texts[offset:] != [p.get("text") for p in blocks]:
+        return []
+    return [offset + i for i, p in enumerate(extras) if _is_temporary(p)]
+
+
+def _restore_user_text_markers(message, original, extras):
+    """Recover persistence flags lost when AstrBot dumps a Message to dict."""
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list):
+        return message
+
+    if isinstance(original, dict):
+        # The modality filter serializes Message objects before calling us,
+        # but the runner also passes the original extra_user_content_parts.
+        if original.get("role") != "user" or any(_is_temporary(p) for p in content):
+            return message
+        marked = _temporary_extra_indices(content, extras)
+    else:
+        source = getattr(original, "content", None)
+        if (
+            getattr(original, "role", None) != "user"
+            or not isinstance(source, list)
+            or len(source) != len(content)
+        ):
+            return message
+        marked = [i for i, p in enumerate(source) if _is_temporary(p)]
+
+    if not marked:
+        return message
+    restored = list(content)
+    for index in marked:
+        part = content[index]
+        if isinstance(part, dict) and part.get("type") == "text":
+            restored[index] = {**part, "_no_save": True}
+    return {**message, "content": restored}
+
+
 def configure(settings: Settings) -> None:
     global _settings
     _settings = settings
@@ -393,6 +455,12 @@ class AgyProvider(Provider):
 
         try:
             raw_contexts = self._ensure_message_to_dicts(contexts) or []
+            if raw_contexts and prompt is None and not tool_calls_result:
+                latest = _restore_user_text_markers(
+                    raw_contexts[-1], contexts[-1], extra_user_content_parts
+                )
+                if latest is not raw_contexts[-1]:
+                    raw_contexts = [*raw_contexts[:-1], latest]
             continuation = continuation or bool(
                 prompt is None and raw_contexts and raw_contexts[-1].get("role") == "tool"
             )

@@ -84,6 +84,87 @@ class ToolsModeTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name)
         self.log_path = self.root / "cli.jsonl"
 
+    async def test_temporary_user_text_reuses_session_but_real_edits_rebuild(self):
+        def text(value):
+            return {"type": "text", "text": value}
+
+        with (
+            patch.dict(sys.modules, _load_provider_module(self.root)),
+            patch.dict(os.environ, {"AGY_TEST_LOG": str(self.log_path)}),
+            patch(
+                "agy_provider.sessions.discover",
+                AsyncMock(return_value=LaunchInfo("fake", "agy 1.5.9", False)),
+            ),
+            patch(
+                "agy_provider.sessions.launch_args",
+                return_value=[sys.executable, str(FIXTURE), "echo"],
+            ),
+        ):
+            sys.modules.pop("agy_provider.provider", None)
+            mod = importlib.import_module("agy_provider.provider")
+            self.addCleanup(sys.modules.pop, "agy_provider.provider", None)
+            self.addCleanup(mod.configure, Settings())
+            for mode in ("strict", "structured"):
+                with self.subTest(mode=mode):
+                    mod.configure(Settings(
+                        enable_tools=True, auth_bridge=False, session_reuse_mode=mode,
+                    ))
+                    provider = mod.AgyProvider({"id": mode, "model": "gemini-test"}, {})
+                    self.addAsyncCleanup(provider.terminate)
+
+                    async def chat(contexts, extras=None):
+                        return await provider.text_chat(
+                            contexts=contexts, extra_user_content_parts=extras,
+                            session_id=mode, func_tool=SimpleNamespace(tools=[_tool("echo")]),
+                            abort_signal=asyncio.Event(),
+                        )
+
+                    # The runner's serialized contexts omit PrivateAttr.
+                    # One extra duplicates the prompt, so position matters.
+                    reminder = text("<system_reminder>persistent</system_reminder>")
+                    extras = [
+                        reminder,
+                        SimpleNamespace(_no_save=True, model_dump=lambda: text("first")),
+                        {**text("temporary snapshot"), "_no_save": True},
+                    ]
+                    user = {"role": "user", "content": [
+                        text("first"), reminder, text("first"), text("temporary snapshot"),
+                    ]}
+                    first = await chat([user], extras)
+                    self.assertEqual(first.completion_text, "reply:1")
+                    self.assertNotIn("_no_save", user["content"][-1])
+
+                    history = [
+                        {"role": "user", "content": [text("first"), reminder]},
+                        {"role": "assistant", "content": [
+                            {"type": "think", "think": "reasoning"}, text(first.completion_text),
+                        ]},
+                    ]
+                    second = await chat([*history, {"role": "user", "content": "second"}])
+                    self.assertEqual(second.completion_text, "reply:2")
+                    self.assertEqual(provider.runtime.telemetry.history[-1]["mode"], "tools")
+                    self.assertTrue(provider.runtime.telemetry.history[-1]["reused"])
+                    self.assertEqual(provider.runtime.telemetry.history[-1]["history_relation"], "exact")
+
+                    # Edit only the previous user message, preserving its reply.
+                    third = await chat([
+                        *history,
+                        {"role": "user", "content": "edited second"},
+                        {"role": "assistant", "content": second.completion_text},
+                        {"role": "user", "content": "third"},
+                    ])
+                    self.assertEqual(third.completion_text, "reply:1")
+                    self.assertEqual(
+                        provider.runtime.telemetry.history[-1]["primary_reason"], "history_rewrite",
+                    )
+
+        events = [json.loads(line) for line in self.log_path.read_text(encoding="utf-8").splitlines()]
+        prompts = [event for event in events if event["event"] == "prompt"]
+        self.assertEqual(len(prompts), 6)
+        for i in (0, 3):
+            self.assertIn("temporary snapshot", "".join(prompts[i]["texts"]))
+            self.assertEqual(prompts[i + 1]["texts"], ["second"])
+
     async def test_resolve_tools_mode_truth_table_and_validation(self):
         stubs = _load_provider_module(self.root)
         with patch.dict(sys.modules, stubs):
