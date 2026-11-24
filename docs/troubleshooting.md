@@ -1,6 +1,6 @@
 # Agent 排障 SOP
 
-适用基线 **v0.8.1 / AstrBot `>=4.29.4,<4.30`**。安全边界见 [AGENTS.md](../AGENTS.md)，源码/测试映射见 [故障定位索引](architecture.md#故障定位索引)。以下流程不要求读取任何凭据或完整人格内容。
+适用于当前插件版本与 AstrBot **`>=4.29.4,<4.30`**。版本见 [metadata.yaml](../metadata.yaml)，安全边界与源码入口见 [AGENTS.md](../AGENTS.md) 和 [故障定位索引](architecture.md#故障定位索引)。
 
 ## 先确定失败阶段
 
@@ -100,6 +100,14 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 - 模型来自账号实际目录，Provider 列表有缓存；保存会复检。切换模型后重置并读取档位选项，不能承诺每个模型都支持 low/medium/high。相同模型及相同配置档位才复用 Provider。
 - 保存结果非空但 `default_selected=false` / `action_error=HOST` 可能是部分成功；全局默认不覆盖已有会话独立偏好。检查目标聊天的 `/agy use`、实例启用状态和 agy_tools_mode。
 - 旧名配置迁移须备份并避开宿主并发写；新配置存在则合并所需字段，不覆盖整份。禁用旧插件防止 `agy_acp` 重复注册，另查 command 包装脚本是否绑定旧数据目录。
+
+## 会话复用与历史重写
+
+1. v0.8.2 修复了临时用户文本仅发送一轮却导致后续误判历史变更的情况。升级并重载插件后，在同一会话沿用同一模型、人格和工具设置，连续发送至少两条普通文本消息。
+2. 在监控里的逐轮记录检查 `reused`、`history_relation` 与 `primary_reason`。回放与预期历史完全匹配、会话仍可用时，后续轮应显示 `reused=true` 和 `history_relation=exact`。
+3. 若仍反复出现 `history_rewrite`，先核对是否发生宿主历史编辑或摘要替换，以及近期注入的块能否由宿主提供临时标记。报告时附插件、AstrBot、AGY CLI 版本和脱敏逐轮字段即可。缺少会话身份的调用会显示 `no_identity`。
+
+复用率统计的是插件是否沿用 ACP 会话，缓存 Token 比例统计的是上游报告的缓存用量。可结合逐轮数据排查。[会话历史机制](architecture.md#会话历史与防重放) · [#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33)
 
 ## 工具、图片与监控
 

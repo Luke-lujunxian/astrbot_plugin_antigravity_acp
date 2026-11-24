@@ -1,25 +1,25 @@
 # 计划与历史资料状态索引
 
-> 核对日期：**2026-11-24**，当前版本基线 **v0.8.1**。本索引用于防止 Agent 将旧的“下一版施工书”“尚未合并”误判为现在的任务。**不在此自动宣告未验收项目通过**。发布与实测证据以 [CHANGELOG](../CHANGELOG.md)、[testing.md](testing.md) 和关联 PR/Issue 为准。
+> 核对日期 **2026-11-25**。当前版本见 [metadata.yaml](../metadata.yaml)，发布与实测证据见 [CHANGELOG](../CHANGELOG.md)、[testing.md](testing.md) 和关联 PR/Issue。
 
 ## 当前有效资料
 
 - [AGENTS.md](../AGENTS.md)：Agent 工作入口、安全边界、开发流程。
-- [architecture.md](architecture.md)、[troubleshooting.md](troubleshooting.md)、[testing.md](testing.md)：当前架构、排障、分层验收，基线 v0.8.1。
-- [兼容补丁登记](compatibility.md)：#14、#19、4.29.4 fallback 等临时宿主适配，以及不能直接删除的协议/安全边界。
+- [architecture.md](architecture.md)、[troubleshooting.md](troubleshooting.md)、[testing.md](testing.md)：当前架构、排障和分层验收。
+- [兼容补丁登记](compatibility.md)：#14、#19、#33、4.29.4 fallback 等宿主适配及协议边界。
 - [WebUI 观测面板计划](webui-observability-dashboard-plan.md)：P0 已落地；未勾选的 P1/P2 是可选积压功能，不是排期发布承诺。
 
 ## 已完成或只供追溯的施工记录
 
 | 历史文档 | 结论/当前用途 |
 | --- | --- |
-| [0.5.0 会话与成本任务书](next-version-task.md) | 历史设计；当前会话逻辑须以 v0.8.1 源码/测试为准，旧行号和建议不应执行 |
+| [0.5.0 会话与成本任务书](next-version-task.md) | 历史设计；当前会话逻辑以源码和测试为准 |
 | [Agent 文档“下一版本”计划](agent-docs-next-release-plan.md) | **已完成并纳入 v0.7.1**（#16/#17）；当时的未合并字样已标注为历史口径 |
 | [LiftGate 0.6.0 加固施工书](liftgate-hardening-plan.md) | #9 相关历史设计；当前契约和已验/未验要另见 [PR #9 验收](pr9-acceptance.md) 及 CHANGELOG |
 | [429 内容相关调研](429-prompt-investigation.md) | 旧阶段证据/假设；后续 #19 Safe Mode 与 #14 能力声明处理见 [兼容补丁](compatibility.md)，不能把所有 429 归为内容原因 |
 | [0.5.0 实现记录](impl-notes-0.5.0.md)、[PR #9 验收](pr9-acceptance.md) | 版本固定的历史验收材料，不证明当前所有部署平台已验 |
 | [旧版交接与报告](archive/HANDOFF_0.4.0.md)、[0.4.0](archive/TEST_REPORT_0.4.0.md)、[0.4.1](archive/TEST_REPORT_0.4.1.md) | 早期交接和测试证据，不作当前任务入口 |
-| [review-bundle](archive/review-bundle/) | 审读快照及旧补丁材料，包含历史源码副本；不可作为 v0.8.1 权威实现 |
+| [review-bundle](archive/review-bundle/) | 审读快照、旧补丁材料及历史源码副本 |
 
 历史 Issue、PR 与 CHANGELOG 仍按旧的根目录路径引用上述文件；本次只把它们归档到 `docs/archive/` 并同步本索引与安全说明，不重写旧实测数据、不把“待测”擅自改成“通过”。
 

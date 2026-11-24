@@ -1,6 +1,6 @@
 # 测试、验收与交付规范
 
-适用基线 **v0.8.1**，Python **3.11+**、AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。数量由本次运行得出，不把旧版本测试总数当作当前结果。
+适用于当前插件版本、Python **3.11+** 和 AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。报告使用本次运行的计数。
 
 ## 开发流程
 
@@ -61,6 +61,14 @@ python -m unittest tests.test_routing tests.test_b06_side_effects tests.test_b07
 ```
 
 v0.8.1 恢复原生 DOM 回归，需实际执行测试；覆盖监控 v2、复制降级等，真实 iframe/视觉测试待 #31。
+
+### 会话复用（#33）
+
+```sh
+python -m unittest tests.test_tools_mode tests.test_tool_pipeline tests.test_sessions -v
+```
+
+重点核对临时文本仍发给模型，宿主按持久化文本回放时复用，真实历史编辑时重建，以及工具续轮后用户消息和工具记录仍能匹配。
 
 ## 全量离线回归
 

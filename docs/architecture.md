@@ -1,6 +1,6 @@
 # 当前架构与源码导航
 
-适用于版本基线 **v0.8.1**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
+运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**。项目约束、排障和测试入口依次见 [AGENTS.md](../AGENTS.md)、[SOP](troubleshooting.md) 和 [测试规范](testing.md)。历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
 
 版本核对：[metadata.yaml](../metadata.yaml) 与 [_version.py](../agy_provider/_version.py) 的 `PLUGIN_VERSION`（由 [main.py](../main.py) 注册、[transport.py](../agy_provider/transport.py) clientInfo、[mcp_bridge.py](../agy_provider/mcp_bridge.py) serverInfo 统一引用，并由 [test_release_hygiene.py](../tests/test_release_hygiene.py) 强校验一致），以这两个文件为准；本文不重复写死具体版本号。排障仍需同时记录部署 SHA 与各字段，不能仅凭标签判断代码版本。
 
@@ -125,6 +125,7 @@ flowchart LR
 | #19 Safe Mode 第 4 条提示词导致的 429 | [system_prompt.py](../agy_provider/system_prompt.py) `filter_host_capabilities` / `_rewrite_safe_mode_rules` | [test_safe_mode_rule.py](../tests/test_safe_mode_rule.py)、[test_system_prompt.py](../tests/test_system_prompt.py) |
 | RATE_LIMIT / QUOTA / NETWORK 告警 | [notices.py](../agy_provider/notices.py)、[errors.py](../agy_provider/errors.py)、[failure_guard.py](../agy_provider/failure_guard.py) | [test_notices.py](../tests/test_notices.py)、[test_upstream_notice_filter.py](../tests/test_upstream_notice_filter.py)、[test_failure_guard.py](../tests/test_failure_guard.py) |
 | EMPTY、复用或压缩后重建 | [sessions.py](../agy_provider/sessions.py)、[messages.py](../agy_provider/messages.py)、[context_usage.py](../agy_provider/context_usage.py) | [test_sessions.py](../tests/test_sessions.py)、[test_hardening.py](../tests/test_hardening.py) |
+| #33 临时用户文本引起历史误重建 | [provider.py](../agy_provider/provider.py)、[messages.py](../agy_provider/messages.py)、[sessions.py](../agy_provider/sessions.py) | [test_tools_mode.py](../tests/test_tools_mode.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
 | 已输出/交接工具后发生重放 | [provider.py](../agy_provider/provider.py)、[host_compat.py](../agy_provider/host_compat.py) | [test_host_replay.py](../tests/test_host_replay.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
 | CLI 启动/目录/进程残留 | [process.py](../agy_provider/process.py)、[paths.py](../agy_provider/paths.py)、[windows_job.py](../agy_provider/windows_job.py) | [test_process_hardening.py](../tests/test_process_hardening.py)、[test_paths.py](../tests/test_paths.py)、[test_main_init.py](../tests/test_main_init.py) |
 | 登录、自检、模型保存 | [auth.py](../agy_provider/auth.py)、[login.py](../agy_provider/login.py)、[probe.py](../agy_provider/probe.py)、[onboarding.py](../agy_provider/onboarding.py) | [test_auth_config.py](../tests/test_auth_config.py)、[test_login.py](../tests/test_login.py)、[test_diagnostics.py](../tests/test_diagnostics.py)、[test_onboarding.py](../tests/test_onboarding.py) |

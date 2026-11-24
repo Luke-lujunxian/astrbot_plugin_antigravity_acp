@@ -7,11 +7,11 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-blue)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29.4%2C%3C4.30-orange)
-![Status](https://img.shields.io/badge/Status-v0.8.1-brightgreen)
+![Status](https://img.shields.io/badge/main-v0.8.2-brightgreen)
 
 通过 Google 官方 `agy` 客户端内置的 ACP（Agent Client Protocol）协议，把 Antigravity 模型安全、稳定地接入 AstrBot，作为日常对话主力。
 
-> 💡 **版本速递（v0.8.1，2026-11-24）**：采用 feat/ui-redesign 可视化界面（原生 HTML / JS / CSS），保留环形统计、会话池占用条、上下文进度、Token 堆叠、耗时柱图、设置进度与响应式布局。兼容 v0.8.0 监控 v2、路由与失败诊断；后端修复全部保留，实机待 #31。
+> 💡 **主分支 v0.8.2（2026-11-25）** 修复 AstrBot 丢弃临时用户文本块后，每轮误报 `history_rewrite` 的问题。可通过下方主分支 ZIP 升级并重载插件，无需更改配置。[#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33)
 
 ---
 
@@ -106,6 +106,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 - **只读诊断与统计指令**：
   - `/agy doctor`：进行无损连通性与会话自检。
   - `/agy cost`：查看各实例只读缓存复用、近 24 小时 Token 统计与进程池摘要（不发任何模型请求）。
+- **同一会话连续出现 `history_rewrite`**：升级至含 #33 修复的 v0.8.2 后，在同一会话连续发送消息，检查后续轮是否显示 `reused=true`。真实历史编辑等情况仍会触发重建。详情见 [会话复用排障](docs/troubleshooting.md#会话复用与历史重写)。
 
 ---
 
@@ -113,6 +114,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 *(完整历史见 [`CHANGELOG.md`](./CHANGELOG.md))*
 
+- **v0.8.2**：修复临时用户文本导致的会话误重建，覆盖普通续聊及工具回填。[#35](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/35)
 - **v0.8.1**：替换为 feat/ui-redesign 原生可视化前端，兼容监控 v2 与复制降级，保留 v0.8.0 后端（实机待 #31）。
 - **v0.8.0**：原生 Dashboard 重构、默认模型路由核对、当前用户输入与历史分离、历史图片预算修复、无正文且未交接工具时的安全 fallback、持久失败诊断（[#34](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/34)；实机待 #31）。
 - **v0.7.5**：修复设置面板复制按钮在 sandbox iframe + 非 HTTPS 下全部失效（#28）——三级降级复制、按钮就地反馈、授权链接「在新标签打开」；轮询差量渲染与 5/10/20/30s 退避、bfcache 恢复、监控重建签名跳过、浅色对比度达 AA、三态主题持久化等 21 项 UI 修正（[#29](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/29)）。
@@ -127,7 +129,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 # 🤖 给 Agent 看的上下文
 
-先读 [AGENTS.md](AGENTS.md)。当前版本基线为 **v0.8.1**；仅支持 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**。本节只保留当前有效契约，历史实现和既有验收见 [CHANGELOG](CHANGELOG.md)。
+先读 [AGENTS.md](AGENTS.md)。当前版本以 [metadata.yaml](metadata.yaml) 为准，支持 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**。历次变更与验收见 [CHANGELOG](CHANGELOG.md)。
 
 | 当前契约 | 详细说明与证据入口 |
 | --- | --- |

@@ -1,5 +1,10 @@
 # 变更记录
 
+## 0.8.2（2026-11-25）
+
+- 修复 AstrBot 在持久化历史时移除临时用户文本，导致后续轮次误报 `history_rewrite` 并重建 ACP 会话的问题。可确认的临时文本仍发给模型，预期回放按宿主实际保存的内容计算。真实用户编辑仍触发重建。[#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33) · [PR #35](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/35)
+- 离线回归覆盖严格及结构化模式、思考块回放、真实历史编辑和工具回填。PR 的 Ubuntu 与 Windows 矩阵已通过，真实 AGY 与生产效果待验证。[CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45433687834)
+
 ## 0.8.1（2026-11-24；实机验收待 #31）
 
 - 前端选用 [feat/ui-redesign](https://github.com/sl251/astrbot_plugin_antigravity_acp/tree/feat/ui-redesign) 的最终可视化设计：环形占比、会话池分段条、上下文进度、Token 构成与耗时柱图、四步进度、连接状态、响应式布局和宿主主题。
