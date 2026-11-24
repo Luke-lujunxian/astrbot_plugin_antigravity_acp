@@ -184,6 +184,8 @@ class ConversationInput:
     clear_transient: bool = False
     force_rebuild: bool = False
     system_bytes: int = 0
+    # The retained tool turn may append exchanges after this user message.
+    persisted_user: tuple[int, str] | None = None
 
     def __post_init__(self) -> None:
         if not self.system_bytes and self.system:
@@ -292,6 +294,21 @@ def normalize(
     if len(system.encode()) > limit:
         raise AgyError("INPUT_LIMIT", "系统提示超过插件字节预算，请缩短人格/系统提示。")
     ctx = prepare_context(system, trusted_parts=trusted_parts, mode=reuse_mode)
+    persisted_user = None
+    if prompt is None and not continuation and contexts:
+        parts = contexts[-1].get("content")
+        if contexts[-1].get("role") == "user" and isinstance(parts, list):
+            kept = [
+                p for p in parts
+                if not (
+                    isinstance(p, dict)
+                    and p.get("type") == "text"
+                    and p.get("_no_save") is True
+                )
+            ]
+            if len(kept) != len(parts):
+                saved = {"role": "user", "content": normalized_content(kept, images=images)}
+                persisted_user = (len(messages) - 1, digest(_history_entry(saved)))
     return ConversationInput(
         ctx.stable_system,
         messages,
@@ -301,6 +318,7 @@ def normalize(
         clear_transient=ctx.clear_transient,
         force_rebuild=ctx.force_rebuild,
         system_bytes=len(ctx.stable_system.encode()),
+        persisted_user=persisted_user,
     )
 
 
