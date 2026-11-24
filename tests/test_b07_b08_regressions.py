@@ -5,6 +5,7 @@ import base64
 import hashlib
 import os
 import struct
+import sys
 import tempfile
 import unittest
 import zlib
@@ -142,6 +143,8 @@ class MediaB07Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught_eoi.exception.code, "IMAGE_EOI")
 
     async def test_b07_image_fingerprints_cache_hit_rewrite_invalidation_and_restart(self):
+        if sys.platform == "win32" or not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+            self.skipTest("本地媒体读取需要 O_NOFOLLOW/dir_fd 安全接口，Windows 上产品按设计 fail-closed")
         settings = self._settings()
         img_file = self.media_dir / "photo.png"
         bytes_v1 = _png_bytes(width=2, height=2, rgb=(1, 2, 3))

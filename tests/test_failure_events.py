@@ -147,6 +147,8 @@ class FailureEventsAndReadOnlyTests(unittest.IsolatedAsyncioTestCase):
             sys.modules[name] = mod
 
     async def test_b09_cost_log_disabled_still_persists_failures_not_ok_and_tracks_service(self):
+        if sys.platform == "win32":
+            self.skipTest("POSIX 权限位断言不适用于 Windows（journal 0o600/0o700 与 mkdir chmod 语义不同）")
         start_diagnostics(self.root)
         tracker = TelemetryTracker(cost_log_enabled=False)
 
