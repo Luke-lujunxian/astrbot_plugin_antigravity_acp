@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const bridge = window.AstrBotPluginView;
 const SVG_NS = "http://www.w3.org/2000/svg";
-let state, pending = false, disposed = false, timer, revision = 0, cachedModels = [], modelSignature = "", effortSignature = "", providerSignature = "";
+let state, pending = false, disposed = false, timer, copyTimer, revision = 0, cachedModels = [], modelSignature = "", effortSignature = "", providerSignature = "";
 let themeMode = "auto", nextManualTheme = "dark";
 let monitorTimer, monitorPending = false, monitorReady = false, monitorSnapshot, reportDiagSignature = "";
 const expandedMonitorSections = new Set();
@@ -66,18 +66,30 @@ function badge(id, text, kind = "") {
   el.dataset.state = kind;
 }
 
+function setConnection(text, kind = "busy") {
+  const node = $("connection");
+  node.textContent = text;
+  node.dataset.state = kind;
+}
+
 function showError(message = "") {
   $("error").textContent = message;
   $("error").hidden = !message;
+}
+
+function showCopyStatus(text) {
+  clearTimeout(copyTimer);
+  $("copy-status").textContent = text;
+  if (text) copyTimer = setTimeout(() => { if (!disposed) $("copy-status").textContent = ""; }, 2600);
 }
 
 async function copy(input) {
   input.focus(); input.select();
   try {
     await navigator.clipboard.writeText(input.value);
-    $("copy-status").textContent = "已复制";
+    showCopyStatus("已复制");
   } catch {
-    $("copy-status").textContent = "已选中，请按 Ctrl+C / ⌘C 复制";
+    showCopyStatus("已选中，请按 Ctrl+C / ⌘C 复制");
   }
 }
 
@@ -214,7 +226,7 @@ function renderPoolTile(pool) {
     }
     tile.append(svg);
   }
-  tile.append(el("span", "kpi-sub", pool ? `存活进程 ${monitorCount(pool.live_processes)} · 续轮 ${monitorCount(pool.active_tool_turns)}` : ""));
+  tile.append(el("span", "kpi-sub", `存活进程 ${monitorCount(pool.live_processes)} · 续轮 ${monitorCount(pool.active_tool_turns)}`));
   return tile;
 }
 
@@ -349,30 +361,32 @@ function renderLatencyChart(recent) {
   );
   block.append(head);
 
-  const width = 300;
+  const width = 600;
+  const baseY = 60;
+  const maxBarH = 52;
   const svg = svgNode("svg", {
-    class: "latency-svg", role: "img", viewBox: `0 0 ${width} 60`, preserveAspectRatio: "none",
+    class: "latency-svg", role: "img", viewBox: `0 0 ${width} 64`, preserveAspectRatio: "none",
     "aria-label": `最近 ${timed.length} 轮请求耗时分布，峰值 ${formatDuration(maxMs)}，均值 ${formatDuration(avgMs)}`,
   });
-  const avgY = 56 - Math.max(4, Math.round((avgMs / maxMs) * 50));
+  const avgY = baseY - Math.max(4, Math.round((avgMs / maxMs) * maxBarH));
   svg.append(
-    svgNode("line", {x1: 0, y1: 56, x2: width, y2: 56, stroke: "var(--line)", "stroke-width": 1}),
+    svgNode("line", {x1: 0, y1: baseY, x2: width, y2: baseY, stroke: "var(--border-strong)", "stroke-width": 1}),
   );
 
-  const slot = width / Math.max(timed.length, 6);
-  const bw = Math.min(18, Math.max(4, slot * 0.68));
+  const slot = width / Math.max(timed.length, 8);
+  const bw = Math.min(28, Math.max(8, slot * 0.56));
   timed.forEach((turn, idx) => {
-    const barH = Math.max(4, Math.round((turn.elapsed_ms / maxMs) * 50));
+    const barH = Math.max(4, Math.round((turn.elapsed_ms / maxMs) * maxBarH));
     const x = (idx * slot + (slot - bw) / 2).toFixed(1);
-    const y = (56 - barH).toFixed(1);
-    const color = turn.status === "ok" ? "var(--chart-input)" : "var(--error)";
-    const rect = svgNode("rect", {x, y, width: bw.toFixed(1), height: barH, rx: 2, fill: color});
+    const y = (baseY - barH).toFixed(1);
+    const color = turn.status === "ok" ? "var(--chart-input)" : turn.status === "cancelled" ? "var(--warn)" : "var(--error)";
+    const rect = svgNode("rect", {class: "latency-bar", x, y, width: bw.toFixed(1), height: barH, rx: 3, fill: color});
     const statusText = turnStatusLabels[turn.status] || "未知";
     rect.append(svgNode("title", {}, `${formatDuration(turn.elapsed_ms)} · ${statusText}${turn.error_code ? ` (${turn.error_code})` : ""} · ${monitorAgo(turn.recorded_at)}`));
     svg.append(rect);
   });
   // 均值参考线
-  svg.append(svgNode("line", {x1: 0, y1: avgY, x2: width, y2: avgY, stroke: "var(--muted)", "stroke-dasharray": "3 3", "stroke-width": 1, opacity: 0.7}));
+  svg.append(svgNode("line", {x1: 0, y1: avgY, x2: width, y2: avgY, stroke: "var(--muted)", "stroke-dasharray": "6 5", "stroke-width": 1, opacity: 0.7}));
   block.append(svg);
 
   const axis = el("div", "chart-axis");
@@ -394,10 +408,10 @@ function renderReasonBars(reasons) {
   top.forEach(([reason, count]) => {
     const row = el("div", "reason-row");
     row.append(el("span", "reason-label", `${rebuildReasonLabels[reason] || reason} × ${monitorCount(count)}`));
-    const svg = svgNode("svg", {class: "reason-svg", viewBox: "0 0 100 6", preserveAspectRatio: "none", "aria-hidden": "true"});
+    const svg = svgNode("svg", {class: "reason-svg", viewBox: "0 0 300 6", preserveAspectRatio: "none", "aria-hidden": "true"});
     svg.append(
-      svgNode("rect", {x: 0, y: 0, width: 100, height: 6, rx: 3, fill: "var(--chart-track)"}),
-      svgNode("rect", {x: 0, y: 0, width: Math.max(3, ((Number.isFinite(count) ? count : 0) / max) * 100).toFixed(1), height: 6, rx: 3, fill: "var(--accent)"}),
+      svgNode("rect", {x: 0, y: 0, width: 300, height: 6, rx: 3, fill: "var(--chart-track)"}),
+      svgNode("rect", {x: 0, y: 0, width: Math.max(8, ((Number.isFinite(count) ? count : 0) / max) * 300).toFixed(1), height: 6, rx: 3, fill: "var(--accent)"}),
     );
     row.append(svg);
     list.append(row);
@@ -415,7 +429,7 @@ function renderHistory(recent, row) {
     const item = el("li", "turn-row");
     const top = el("div", "turn-row-top");
     const statusLabel = turnStatusLabels[turn.status] || "未知";
-    const statusClass = turn.status === "ok" ? "tone-ok" : "tone-error";
+    const statusClass = turn.status === "ok" ? "tone-ok" : turn.status === "cancelled" ? "tone-warn" : "tone-error";
     top.append(
       el("span", statusClass, `${statusLabel}${turn.error_code ? ` · ${turn.error_code}` : ""}`),
       el("span", "small", `${turn.reused ? "复用" : "新建"} · ${formatDuration(turn.elapsed_ms)} · ${monitorAgo(turn.recorded_at)}`),
@@ -555,7 +569,7 @@ function renderMonitor(data) {
         renderRingTile(
           "缓存读取占比",
           summary?.cache_token_ratio,
-          missingCache > 0 ? `${monitorCount(missingCache)} 轮缺缓存字段` : "",
+          missingCache > 0 ? `${monitorCount(missingCache)} 轮缺缓存字段` : reportedTurns > 0 ? `基于 ${monitorCount(reportedTurns)} 轮已上报` : "",
           reportedTurns > 0 && reportedTurns === missingCache ? "未报告缓存字段" : "暂无样本",
           "var(--chart-cached)",
         ),
@@ -653,7 +667,7 @@ function render(data) {
   const models = cachedModels;
 
   renderSetupProgress(data, passed);
-  $("connection").textContent = busy ? "正在同步…" : "已连接 AstrBot";
+  setConnection(busy ? "正在同步…" : "已连接 AstrBot", busy ? "busy" : "ok");
   $("environment").textContent = `${data.environment.system} · Python ${data.environment.python}${data.environment.container ? " · 容器环境" : ""}`;
   $("discovery-hint").textContent = data.environment.discovery_hint || "";
   $("install-hint").textContent = data.environment.install_hint;
@@ -824,7 +838,7 @@ async function poll() {
       if (!pending && !disposed && currentRevision === revision) render(data);
     }
   } catch (error) {
-    $("connection").textContent = "连接中断，请刷新页面";
+    setConnection("连接中断，请刷新页面", "error");
     showError(error.message || "无法读取状态。");
   } finally {
     if (!disposed) timer = setTimeout(poll, state?.busy || (state && activeLogin(state.login)) ? 1200 : 5000);
@@ -840,6 +854,7 @@ window.addEventListener("pagehide", () => {
   disposed = true;
   clearTimeout(timer);
   clearTimeout(monitorTimer);
+  clearTimeout(copyTimer);
   monitorSnapshot = undefined;
   $("auth-code").value = "";
   $("auth-url").value = "";
@@ -847,6 +862,7 @@ window.addEventListener("pagehide", () => {
 });
 
 if (!bridge) {
+  setConnection("未连接 AstrBot", "error");
   showError("请从 AstrBot WebUI 侧边栏或插件详情打开 Antigravity ACP 面板。");
   badge("monitor-badge", "不可用");
   $("monitor-message").textContent = "请从 AstrBot 管理面板打开运行监控。";
@@ -857,6 +873,7 @@ if (!bridge) {
     refreshMonitor();
     await poll();
   } catch (error) {
+    setConnection("面板连接失败", "error");
     showError(error.message || "面板连接失败。");
     badge("monitor-badge", "不可用", "error");
     $("monitor-message").textContent = "面板连接失败，请刷新页面。";

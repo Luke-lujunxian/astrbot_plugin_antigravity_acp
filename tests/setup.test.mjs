@@ -457,3 +457,44 @@ test("setup progress stepper reflects environment, login, model and enabled inst
   none.api.render(blocked);
   assert.deepEqual(items().map(li => li.className), ["is-current", "", "", ""]);
 });
+
+test("app.js only references CSS variables defined in style.css", () => {
+  const css = readFileSync(new URL("../views/setup/style.css", import.meta.url), "utf8");
+  const defined = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map(([, name]) => name));
+  const referenced = new Set([...source.matchAll(/var\((--[\w-]+)/g)].map(([, name]) => name));
+  const missing = [...referenced].filter(name => !defined.has(name));
+  assert.deepEqual(missing, []);
+});
+
+test("connection indicator tracks ok, busy and error states and cancelled turns use warn tone", async () => {
+  const ui = await boot(base());
+  assert.equal(ui.get("connection").dataset.state, "ok");
+
+  const busy = base();
+  busy.busy = true;
+  ui.api.render(busy);
+  assert.equal(ui.get("connection").dataset.state, "busy");
+
+  ui.bridge.apiGet = async () => {throw new Error("network down");};
+  await ui.api.poll();
+  assert.equal(ui.get("connection").dataset.state, "error");
+
+  const payload = monitorPayload({
+    context_used: null, context_window_size: null, observed_at: null,
+    source: "not_reported", scope: "latest_live_session", model: "gemini-test",
+  });
+  payload.instances[0].recent_turns = [{
+    recorded_at: "2026-11-17T00:04:00+00:00", model: "gemini-test", mode: "chat",
+    status: "cancelled", error_code: null, elapsed_ms: 350,
+    input_other: null, input_cached: null, output: null, usage_status: "unavailable",
+    cache_fields_present: {cachedReadTokens: false, cachedWriteTokens: false},
+    context_used: null, context_window_size: null, observed_at: null,
+    reused: true, rebuild_reasons: [],
+    prompt_bytes: 120, replay_bytes: 0, omitted_messages: 0,
+    content_429_candidate: null,
+  }];
+  ui.api.renderMonitor(payload);
+  const nodes = collectNodes(ui.get("monitor-instances"));
+  assert.ok(nodes.some(n => n.className === "tone-warn" && n.textContent === "取消"));
+  assert.ok(nodes.some(n => n.tag === "rect" && n.attributes.fill === "var(--warn)"));
+});
