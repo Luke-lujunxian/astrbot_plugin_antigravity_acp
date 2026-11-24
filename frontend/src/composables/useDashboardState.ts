@@ -406,10 +406,10 @@ export function createDashboardController() {
       clearTimeout(monitorTimer);
       monitorTimer = null;
     }
-    if (disposed || suspended || document.hidden || monitorPending || !ready || !bridge) return;
+    if (disposed || suspended || document.hidden || monitorPending.value || !ready || !bridge) return;
 
     const epoch = refreshEpoch;
-    monitorPending = true;
+    monitorPending.value = true;
     try {
       const raw = await bridge.apiGet('monitor/status');
       if (!disposed && epoch === refreshEpoch) {
@@ -436,7 +436,7 @@ export function createDashboardController() {
       }
     } finally {
       if (!disposed && epoch === refreshEpoch) {
-        monitorPending = false;
+        monitorPending.value = false;
         if (!document.hidden) {
           monitorTimer = setTimeout(() => {
             void refreshMonitor();
@@ -457,7 +457,7 @@ export function createDashboardController() {
       monitorTimer = null;
     }
     pollPending = false;
-    monitorPending = false;
+    monitorPending.value = false;
   }
 
   function resumeRefresh(): void {

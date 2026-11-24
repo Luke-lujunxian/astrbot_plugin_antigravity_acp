@@ -1,6 +1,6 @@
 # ACP #30 前端原生 Dashboard 重构 & #32 路由诊断交接文档
 
-> **当前状态声明**：前端源码、构建配置、CI/归档配置与本文档已完成。**测试、依赖安装、类型检查和构建未执行，按用户要求交 Hydrogen**。本次未执行实机、浏览器、截图或 AstrBot 4.30.x 验收；插件版本保留 `v0.7.5` 候选（不预设 `v0.8.0` 发布，不放宽 `metadata.yaml` 版本约束）。
+> **当前状态声明**：前端源码交付，**离线 QA 仍进行中**。已针对 Hydrogen 真实 QA 首轮检出的阻塞项（`qa-logs/02-npm-typecheck.log` 的 5 处 TypeScript/`monitorPending` ref 缺陷、`qa-logs/04-check-sensitive.log` 的文档版本写法误报，以及 MIT/OFL 随包完整许可文本缺失）完成定向修复并交付复测。**本次返工未执行测试、依赖安装、类型检查或构建，按用户要求交 Hydrogen 复验。** 仍未执行实机、浏览器、截图或 AstrBot 4.30.x 验收；插件版本保留 `v0.7.5` 候选（不预设 `v0.8.0` 发布，不放宽 `metadata.yaml` 版本约束）。
 
 ---
 
@@ -13,7 +13,7 @@
 - **后端兼容范围**：`>=4.29.4,<4.30`（保持不变，不放宽）
 - **后端契约源**：[acp-32-backend-handoff.md](acp-32-backend-handoff.md)（只读参照）
 - **一手对照源码（本地证据目录 `../evidence/astrbot-v4.29.4/`）**：
-  - `dashboard/package.json`：锁定核心兼容版本 `vue@3.3.4`、`vuetify@3.7.11`、`vite-plugin-vuetify@2.1.3`、`@vitejs/plugin-vue@5.2.4`、`vite@6.4.1`、`typescript@5.1.6`、`vue-tsc@1.8.8`
+  - `dashboard/package.json`：锁定核心兼容版本 `vue` (`3.3.4`)、`vuetify` (`3.7.11`)、`vite-plugin-vuetify` (`2.1.3`)、`@vitejs/plugin-vue` (`5.2.4`)、`vite` (`6.4.1`)、`typescript` (`5.1.6`)、`vue-tsc` (`1.8.8`)
   - `dashboard/src/plugins/vuetify.ts`：Vuetify 主题与默认属性（`VCard.rounded='lg'`、`VSnackbar.elevation=6, rounded='lg'`、`VTextField.rounded='lg'`、`VTooltip.location='top'`、`VBtn={}`）
   - `dashboard/src/theme/LightTheme.ts` / `DarkTheme.ts`：官方浅色/深色主色、表面、边框、文字与代码色板
   - `dashboard/src/scss/_variables.scss`：`$border-radius-root: 8px`、`lg = 16px`、`Outfit + Noto Sans + CJK fallback`、字阶（`body-1: 14px`、`body-2: 12px`、`h1-h6`）、卡片内边距（`20px 24px` / `24px`、`card-title: 18px`）
@@ -157,21 +157,21 @@ CI 流程（[.github/workflows/test.yml](../.github/workflows/test.yml)）在 `u
 
 ### 3.3 打包与忽略规则
 
-- [.gitattributes](../.gitattributes)：将 `/frontend` 与 `/frontend/**` 标记为 `export-ignore`，发行归档（`git archive` / Release zip）不包含前端源码、`node_modules` 或构建工具；**`/views/setup/**` 明确保留**，用户部署无需 Node.js。同时统一 `/frontend/**` 与 `/views/setup/**` 文本文件为 `eol=lf`，`.woff2/.woff/.png/.ico` 标记 `binary`。
-- [.gitignore](../.gitignore)：忽略 `frontend/node_modules/`、`frontend/dist/`、`frontend/.vite/` 与 `frontend/*.tsbuildinfo`；保留 `frontend/package-lock.json` 与 `views/setup/` 纳入版本控制。
+- [.gitattributes](../.gitattributes)：将 `/frontend` 与 `/frontend/**` 标记为 `export-ignore`，发行归档（`git archive` / Release zip）不包含前端源码、`node_modules` 或构建工具；**`/views/setup/**` 与 `/LICENSES/**` 均明确保留**，用户部署无需 Node.js 且随包保留第三方完整许可文本。同时统一 `/frontend/**` 与 `/views/setup/**` 文本文件为 `eol=lf`，`.woff2/.woff/.png/.ico` 标记 `binary`。
+- [.gitignore](../.gitignore)：忽略 `frontend/node_modules/`、`frontend/dist/`、`frontend/.vite/` 与 `frontend/*.tsbuildinfo`；保留 `frontend/package-lock.json`、`views/setup/` 与 `LICENSES/` 纳入版本控制。
 
 ---
 
 ## 4. 真实前端依赖与许可清单
 
-详见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+详见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。因构建配置 `esbuild.legalComments: 'none'` 去除产物内注释横幅，所有打包进入 `views/setup/` 的第三方运行时上游版权与完整许可原件均随仓库及发行归档保留于 `LICENSES/` 目录：
 
-| 依赖包 | 版本 | 用途 | 许可 | 是否打入 `views/setup/` |
+| 依赖包 | 版本 | 用途 | 许可与随包原件 | 是否打入 `views/setup/` |
 | --- | --- | --- | --- | --- |
-| `vue` | `3.3.4` | Vue 3 运行时（对齐 AstrBot 4.29.4） | MIT | 是（tree-shaken） |
-| `vuetify` | `3.7.11` | Vuetify 3 组件库（对齐 AstrBot 4.29.4） | MIT | 是（`vite-plugin-vuetify` 按需引入） |
-| `@mdi/js` | `^7.4.47` | 最小 SVG path 图标集（无整包字体） | Apache-2.0 / Pictogrammers Free License | 是（仅打包实际引用的约 40 个 path） |
-| `@fontsource/outfit` | `^5.0.0` | 本地打包 Outfit 400/500/600/700 字体（零 CDN） | MIT（包）/ SIL OFL 1.1（字体） | 是（仅 woff2 静态文件） |
+| `vue` | `3.3.4` | Vue 3 运行时（对齐 AstrBot 4.29.4，含 `@vue/*` 子包） | MIT（[LICENSES/vue.txt](../LICENSES/vue.txt)） | 是（tree-shaken） |
+| `vuetify` | `3.7.11` | Vuetify 3 组件库（对齐 AstrBot 4.29.4） | MIT（[LICENSES/vuetify.txt](../LICENSES/vuetify.txt)） | 是（`vite-plugin-vuetify` 按需引入） |
+| `@mdi/js` | `^7.4.47` | 最小 SVG path 图标集（无整包字体） | Pictogrammers Free License / Apache-2.0 图标 / MIT 代码（[LICENSES/mdi.txt](../LICENSES/mdi.txt)） | 是（仅打包实际引用的约 40 个 path） |
+| `@fontsource/outfit` | `^5.0.0` | 本地打包 Outfit 400/500/600/700 字体（零 CDN） | SIL OFL 1.1 字体 / MIT 包（[LICENSES/outfit.txt](../LICENSES/outfit.txt)） | 是（仅 woff2 静态文件） |
 | `vite` | `6.4.1` | 打包构建工具 | MIT | 否（devDependency） |
 | `@vitejs/plugin-vue` | `5.2.4` | Vue SFC 编译插件 | MIT | 否（devDependency） |
 | `vite-plugin-vuetify` | `2.1.3` | Vuetify 组件按需自动引入 | MIT | 否（devDependency） |
@@ -181,7 +181,17 @@ CI 流程（[.github/workflows/test.yml](../.github/workflows/test.yml)）在 `u
 
 ---
 
-## 5. 待 Hydrogen / QA 验证步骤
+## 5. Hydrogen 首轮 QA 发现与定向返工记录（待复测）
+
+针对 Hydrogen 真实 QA 日志（`qa-logs/02-npm-typecheck.log`、`qa-logs/04-check-sensitive.log`）与合规检查发现的阻塞项，已做如下最小修复，**均待 Hydrogen 重新执行 typecheck / build / 敏感扫描 / 离线回归复验**：
+
+1. **`useDashboardState.ts` `monitorPending` ref 误用（阻塞监控轮询 + TS2588）**：`refreshMonitor` 守卫与赋值、`pauseRefresh` 重置全部修正为 `monitorPending.value`，保持对外返回 ref 契约不变。
+2. **`MonitorCharts.vue` 空值收窄（TS18047）**：`rebuildReasons` 及 Token 计算改用局部可选变量，避免 `props.summary` 为 `null` 时的类型报错，不使用非空断言。
+3. **`diagnostics.ts` 空值收窄（TS18047）**：`failure_events`、`failure_retention`、`window` 改用局部可选变量收窄，保持严格白名单不导出 `csrf`/`ticket`/`code`/`url`。
+4. **文档敏感扫描误报**：`docs/acp-30-frontend-handoff.md` 第 16 行由 `pkg@x.y.z` 改为 `` `pkg` (`x.y.z`) ``，保留精确版本号且不触发邮箱正则，未改动扫描器或白名单。
+5. **上游完整许可文本补齐**：从实际安装依赖原样引入 `LICENSES/vue.txt`、`LICENSES/vuetify.txt`、`LICENSES/outfit.txt`、`LICENSES/mdi.txt`，并在 `THIRD_PARTY_NOTICES.md` 与本文档建立显式链接。
+
+### 5.1 待 Hydrogen / QA 验证步骤
 
 1. **依赖与安全**：在 `frontend/` 执行 `npm install --ignore-scripts` 生成 `package-lock.json`，随后验证 `npm ci --ignore-scripts` 可复现；确认构建后运行 `python tools/check_sensitive.py` 无敏感扫描误报（`vite.config.ts` 已配置 `esbuild.legalComments: 'none'`）。
 2. **类型检查与构建**：执行 `npm run typecheck`、`npm run build`、`npm run build:ci`、`npm run verify:dist`，确认 `views/setup/` 仅包含新生成的 `index.html` 与 `assets/*`（旧 `app.js`/`style.css` 已随 `emptyOutDir` 清除）、相对路径为 `./assets/...` 且无任何外网 CDN URL。

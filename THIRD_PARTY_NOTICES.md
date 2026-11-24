@@ -47,13 +47,16 @@ were independently written for this MIT-licensed repository; no AstrBot AGPL
 dashboard source files are vendored.
 
 Frontend packages declared in `frontend/package.json` (installed and bundled into
-`views/setup/` during build):
+`views/setup/` during build; because Vite strips inline banner comments with
+`esbuild.legalComments: 'none'`, the verbatim upstream copyright notices and
+license texts for all bundled runtime packages are shipped alongside the plugin
+in `LICENSES/`, which is retained in `git archive` and release packages):
 
-- `vue` (`3.3.4`): MIT License — Vue.js runtime compiled into `views/setup/assets/`.
-- `vuetify` (`3.7.11`): MIT License — UI component library tree-shaken into `views/setup/assets/`.
-- `@mdi/js` (`^7.4.47`): Apache-2.0 License (JS wrapper) / Pictogrammers Free License (Material Design Icons SVG paths) — tree-shaken minimal SVG path subset only; full icon fonts are not bundled.
-- `@fontsource/outfit` (`^5.0.0`): MIT License (packaging) & SIL Open Font License 1.1 (Outfit font weights 400/500/600/700 bundled locally as static woff2 assets; no CDN requests). CJK glyphs use local system font fallbacks.
-- Build-time devDependencies (`vite` 6.4.1, `@vitejs/plugin-vue` 5.2.4, `vite-plugin-vuetify` 2.1.3, `typescript` 5.1.6, `vue-tsc` 1.8.8, `@types/node` ^20.5.7): MIT / Apache-2.0 Licenses; excluded from plugin release archives via `.gitattributes`.
+- `vue` (`3.3.4`, including bundled `@vue/*` runtime subpackages): MIT License — Vue.js runtime compiled into `views/setup/assets/`. Full upstream license text: [LICENSES/vue.txt](LICENSES/vue.txt).
+- `vuetify` (`3.7.11`): MIT License — UI component library tree-shaken into `views/setup/assets/`. Full upstream license text: [LICENSES/vuetify.txt](LICENSES/vuetify.txt).
+- `@mdi/js` (`^7.4.47`): Pictogrammers Free License (Apache-2.0 for icons, MIT for code) — tree-shaken minimal SVG path subset only; full icon fonts are not bundled. Full upstream license text: [LICENSES/mdi.txt](LICENSES/mdi.txt).
+- `@fontsource/outfit` (`^5.0.0`): SIL Open Font License 1.1 (Outfit font weights 400/500/600/700 bundled locally as static woff2 assets; no CDN requests; Fontsource npm packaging under MIT). CJK glyphs use local system font fallbacks. Full upstream font license text: [LICENSES/outfit.txt](LICENSES/outfit.txt).
+- Build-time devDependencies (`vite` 6.4.1, `@vitejs/plugin-vue` 5.2.4, `vite-plugin-vuetify` 2.1.3, `typescript` 5.1.6, `vue-tsc` 1.8.8, `@types/node` ^20.5.7): MIT / Apache-2.0 Licenses; build-time only and excluded from plugin release archives via `.gitattributes`.
 
 The DSH reference project's copyright and MIT license are retained below for the
 adapted configuration and protocol patterns:

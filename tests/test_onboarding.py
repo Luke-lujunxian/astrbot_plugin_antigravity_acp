@@ -24,7 +24,17 @@ class FakeDefaultConfig(dict):
     """Model AstrBotConfig's dict interface and save_config() persistence."""
 
     def __init__(self, manager):
-        super().__init__(provider=[], provider_sources=[])
+        super().__init__(
+            provider=[],
+            provider_sources=[],
+            dashboard={"username": "admin"},
+            agent_runner={
+                "runner_type": "local",
+                "config": {
+                    "model": {"provider_id": "original", "fallback_provider_ids": []}
+                },
+            },
+        )
         self._manager = manager
 
     def save_config(self):
@@ -32,21 +42,33 @@ class FakeDefaultConfig(dict):
 
 
 class FakeManager:
-    """Model 4.29.4's resource_lock, acm.default_conf, load-before-save create and save-before-reload update."""
+    """Model 4.29.4's resource_lock, acm, provider_insts, resolver, and save/reload."""
 
     def __init__(self):
         self.reload_lock = asyncio.Lock()
         self.resource_lock = asyncio.Lock()
         default_conf = FakeDefaultConfig(self)
-        self.acm = types.SimpleNamespace(default_conf=default_conf)
+        self.acm = types.SimpleNamespace(
+            default_conf=default_conf,
+            confs={"default": default_conf},
+            get_conf=lambda umo=None: default_conf,
+        )
         self.providers_config = default_conf["provider"]
         self.provider_sources_config = default_conf["provider_sources"]
         self.persisted = []
         self.persisted_sources = []
+        self.persisted_runner = deepcopy(default_conf["agent_runner"])
         self.inst_map = {}
+        self.provider_insts = []
+        self.curr_provider_inst = None
         self.default = "original"
         self.fail = ""
         self.creates = 0
+        self._provider_change_hooks = []
+
+    def register_provider_change_hook(self, hook):
+        if hook not in self._provider_change_hooks:
+            self._provider_change_hooks.append(hook)
 
     def get_merged_provider_config(self, config):
         merged = deepcopy(config)
@@ -71,12 +93,24 @@ class FakeManager:
         default_conf = self.acm.default_conf
         self.persisted = deepcopy(default_conf["provider"])
         self.persisted_sources = deepcopy(default_conf.get("provider_sources", []))
+        self.persisted_runner = deepcopy(default_conf.get("agent_runner", {}))
+
+    async def terminate_provider(self, provider_id):
+        inst = self.inst_map.pop(provider_id, None)
+        if inst in self.provider_insts:
+            self.provider_insts.remove(inst)
+        if self.curr_provider_inst is inst:
+            self.curr_provider_inst = None
 
     async def load_provider(self, config):
         merged = self.get_merged_provider_config(config)
         if not merged.get("enable"):
             return
-        self.inst_map[config["id"]] = object()
+        inst = types.SimpleNamespace(provider_config=deepcopy(merged))
+        self.inst_map[config["id"]] = inst
+        self.provider_insts.append(inst)
+        if not self.curr_provider_inst:
+            self.curr_provider_inst = inst
 
     async def create_provider(self, config):
         async with self.resource_lock:
@@ -121,11 +155,10 @@ class FakeManager:
         async with self.reload_lock:
             if self.fail == "reload":
                 raise ValueError("private details")
+            await self.terminate_provider(config["id"])
             merged = self.get_merged_provider_config(config)
             if merged.get("enable"):
-                self.inst_map[config["id"]] = object()
-            else:
-                self.inst_map.pop(config["id"], None)
+                await self.load_provider(config)
             self.providers_config = self.acm.default_conf["provider"]
             self.provider_sources_config = self.acm.default_conf.get("provider_sources", [])
 
@@ -134,7 +167,23 @@ class FakeManager:
             raise ValueError(f"Provider {provider_id} does not exist and cannot be set.")
         if self.fail == "default":
             raise OSError("private details")
+        self.curr_provider_inst = self.inst_map[provider_id]
         self.default = provider_id
+
+    def _resolve_using_provider(self, provider_type, umo, provider_id):
+        provider = self.inst_map.get(provider_id) if provider_id else None
+        if not provider:
+            config = self.acm.get_conf(umo)
+            agent_runner = config.get("agent_runner", {})
+            pid = (
+                agent_runner.get("config", {}).get("model", {}).get("provider_id")
+                if agent_runner.get("runner_type") == "local"
+                else None
+            )
+            provider = self.inst_map.get(pid)
+            if not provider:
+                provider = self.provider_insts[0] if self.provider_insts else None
+        return provider
 
 
 class OnboardingTests(unittest.IsolatedAsyncioTestCase):
@@ -212,16 +261,25 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         await self.service.job
 
     async def test_unauthorized_read_and_write(self):
-        self.request.username = ""
-        for action in (
+        actions = (
             "status",
             "check",
             "login",
             "apply",
             "login-code",
             "login-cancel",
-        ):
+            "provider-impact",
+            "provider-default",
+            "provider-toggle",
+            "provider-delete",
+        )
+        self.request.username = ""
+        for action in actions:
             self.assertEqual((await self.call(action))["status_code"], 401)
+        for non_admin in ("ordinary-user", "api_key:123"):
+            self.request.username = non_admin
+            for action in actions:
+                self.assertEqual((await self.call(action))["status_code"], 403)
 
     async def test_invalid_nonce_and_payload_types(self):
         for payload in (
@@ -269,7 +327,7 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         own = list(self.context.registered_web_apis)
         other = (own[0][0], AsyncMock(), ["GET"], "another instance")
         self.context.registered_web_apis.append(other)
-        self.assertEqual(len(own), 6)
+        self.assertEqual(len(own), 10)
         await self.service.close()
         self.assertEqual(self.context.registered_web_apis, [other])
         self.assertEqual((await self.call("status"))["status_code"], 400)
@@ -375,10 +433,20 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.manager.fail = "default"
         await self.apply(use_default=True)
         self.assertEqual(self.service.action_error, "HOST")
+        self.assertEqual(self.service.result["provider_state"], "created")
         self.assertFalse(self.service.result["default_selected"])
+        self.assertEqual(
+            self.manager.persisted_runner["config"]["model"]["provider_id"],
+            "original",
+        )
         self.manager.fail = ""
         await self.apply(use_default=True)
         self.assertTrue(self.service.result["default_selected"])
+        self.assertEqual(self.service.result["provider_state"], "existing")
+        self.assertEqual(
+            self.manager.persisted_runner["config"]["model"]["provider_id"],
+            self.service.result["provider_id"],
+        )
         self.assertEqual(self.manager.creates, 1)
 
     async def test_shutdown_waits_for_host_commit(self):

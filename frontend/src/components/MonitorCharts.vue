@@ -17,30 +17,28 @@ const reportedTurns = computed(() => props.summary?.reported_usage_turns ?? 0);
 const unavailableTurns = computed(() => props.summary?.unavailable_usage_turns ?? 0);
 const missingCacheTurns = computed(() => props.summary?.missing_cache_field_turns ?? 0);
 
-const hasCachedBucket = computed(
-  () =>
+const hasCachedBucket = computed(() => {
+  const cached = props.summary?.total_input_cached;
+  return (
     reportedTurns.value > 0 &&
     reportedTurns.value > missingCacheTurns.value &&
-    typeof props.summary?.total_input_cached === 'number' &&
-    Number.isFinite(props.summary.total_input_cached),
-);
+    typeof cached === 'number' &&
+    Number.isFinite(cached)
+  );
+});
 
-const inputOther = computed(() =>
-  typeof props.summary?.total_input_other === 'number' &&
-  Number.isFinite(props.summary.total_input_other)
-    ? props.summary.total_input_other
-    : 0,
-);
-const inputCached = computed(() =>
-  hasCachedBucket.value && typeof props.summary?.total_input_cached === 'number'
-    ? props.summary.total_input_cached
-    : 0,
-);
-const outputTotal = computed(() =>
-  typeof props.summary?.total_output === 'number' && Number.isFinite(props.summary.total_output)
-    ? props.summary.total_output
-    : 0,
-);
+const inputOther = computed(() => {
+  const value = props.summary?.total_input_other;
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+});
+const inputCached = computed(() => {
+  const value = props.summary?.total_input_cached;
+  return hasCachedBucket.value && typeof value === 'number' ? value : 0;
+});
+const outputTotal = computed(() => {
+  const value = props.summary?.total_output;
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+});
 const tokenTotal = computed(() => inputOther.value + inputCached.value + outputTotal.value);
 
 const stackBars = computed(() => {
@@ -113,9 +111,10 @@ const latencyStats = computed(() => {
   return { maxMs, avgMs, latestMs, bars };
 });
 
-const rebuildReasons = computed(() =>
-  Array.isArray(props.summary?.rebuild_reasons) ? props.summary.rebuild_reasons.slice(0, 8) : [],
-);
+const rebuildReasons = computed(() => {
+  const reasons = props.summary?.rebuild_reasons;
+  return Array.isArray(reasons) ? reasons.slice(0, 8) : [];
+});
 
 const rebuildTotal = computed(() =>
   rebuildReasons.value.reduce((acc, [, n]) => acc + (Number.isFinite(n) ? n : 0), 0),

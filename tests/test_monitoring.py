@@ -40,6 +40,10 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         self.provider.configure(Settings(cost_log_enabled=False, auth_bridge=False))
         self.manager = FakeManager()
         self.manager.acm.default_conf["dashboard"] = {"username": "panel-owner"}
+        self.manager.acm.default_conf["agent_runner"] = {
+            "runner_type": "local",
+            "config": {"model": {"provider_id": "one", "fallback_provider_ids": []}},
+        }
         self.context = types.SimpleNamespace(
             provider_manager=self.manager, registered_web_apis=[],
         )
@@ -99,13 +103,39 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response["status_code"], 200)
             self.assertEqual(response["headers"]["Cache-Control"], "no-store")
             data = response["data"]
-            self.assertEqual(set(data), {"schema_version", "sampled_at", "window", "instances"})
-            self.assertEqual(data["schema_version"], 1)
+            self.assertEqual(
+                set(data),
+                {
+                    "schema_version",
+                    "routing",
+                    "failure_events",
+                    "failure_retention",
+                    "sampled_at",
+                    "window",
+                    "instances",
+                },
+            )
+            self.assertEqual(data["schema_version"], 2)
             self.assertIsNotNone(datetime.fromisoformat(data["sampled_at"]).tzinfo)
             self.assertEqual(data["window"], {"hours": 24, "max_turns_per_instance": 100})
             a, b, c = data["instances"]
-            self.assertEqual(set(a), {"provider_id", "model", "enabled", "tools_mode", "effective_mode",
-                                     "tools_enabled", "runtime_state", "pool", "summary", "latest_context", "recent_turns"})
+            self.assertEqual(
+                set(a),
+                {
+                    "provider_id",
+                    "provider_tag",
+                    "model",
+                    "enabled",
+                    "tools_mode",
+                    "effective_mode",
+                    "tools_enabled",
+                    "runtime_state",
+                    "pool",
+                    "summary",
+                    "latest_context",
+                    "recent_turns",
+                },
+            )
             self.assertEqual(set(a["pool"]), {"active_sessions", "max_sessions", "live_processes", "active_tool_turns"})
             self.assertEqual(a["pool"]["live_processes"], 1)
             self.assertEqual(set(a["summary"]), {
@@ -132,10 +162,15 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             turns = a["recent_turns"]
             self.assertEqual(len(turns), 20)
             self.assertEqual(set(turns[0]), {
-                "recorded_at", "model", "mode", "status", "error_code", "elapsed_ms",
+                "recorded_at", "model", "negotiated_model", "mode", "status", "error_code", "elapsed_ms",
                 "input_other", "input_cached", "output", "usage_status", "cache_fields_present",
                 "context_used", "context_window_size", "observed_at", "reused", "rebuild_reasons",
-                "prompt_bytes", "replay_bytes", "omitted_messages", "content_429_candidate"})
+                "prompt_bytes", "replay_bytes", "omitted_messages", "content_429_candidate",
+                "turn_id", "origin_turn_id", "logical_request_tag", "attempt", "cli_retry_attempt",
+                "chunk_seen", "body_seen", "body_streamed", "tool_handed_off", "tool_result_supplied",
+                "body_bytes", "thought_bytes", "stop_reason", "permission_denial_count",
+                "filtered_notice_count", "fallback_allowed", "fallback_reason",
+            })
             self.assertEqual(turns[0]["content_429_candidate"], {
                 "system_hash8": "1234abcd", "system_bytes": 42, "has_output": False, "attempt": 2})
             encoded = json.dumps(data)
@@ -251,6 +286,11 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             "input_other", "input_cached", "output", "usage_status", "cache_fields_present",
             "context_used", "context_window_size", "observed_at", "reused", "rebuild_reasons",
             "prompt_bytes", "replay_bytes", "omitted_messages", "content_429_candidate",
+            "negotiated_model", "turn_id", "origin_turn_id", "logical_request_tag",
+            "attempt", "cli_retry_attempt", "chunk_seen", "body_seen", "body_streamed",
+            "tool_handed_off", "tool_result_supplied", "body_bytes", "thought_bytes",
+            "stop_reason", "permission_denial_count", "filtered_notice_count",
+            "fallback_allowed", "fallback_reason",
         }
         projected = inst.runtime.telemetry.safe_recent_turns()
         self.assertEqual(len(projected), 1)

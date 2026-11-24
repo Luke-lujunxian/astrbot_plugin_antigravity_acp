@@ -157,13 +157,14 @@ class ReleaseHygieneTests(unittest.TestCase):
             ]
             cur_blocks, cur_omitted = prompt_blocks(mm_cur_messages, 1000)
             self.assertEqual(cur_omitted, 2)
-            self.assertEqual([b.get("type") for b in cur_blocks], ["text", "text", "image"])
-            self.assertEqual(cur_blocks[1], {"type": "text", "text": "Conversation attachment 1:"})
-            self.assertEqual(cur_blocks[2], cur_img)
-            self.assertIn(expected_sha, cur_blocks[0]["text"])
-            self.assertIn('"status": "historical"', cur_blocks[0]["text"])
-            self.assertIn(digest(cur_img), cur_blocks[0]["text"])
-            self.assertIn('"attachment": 1', cur_blocks[0]["text"])
+            self.assertEqual([b.get("type") for b in cur_blocks], ["text", "image"])
+            self.assertEqual(cur_blocks[1], cur_img)
+            history_part, current_tail = cur_blocks[0]["text"].split("</astrbot_history>", 1)
+            self.assertIn(expected_sha, history_part)
+            self.assertIn('"status": "historical"', history_part)
+            self.assertNotIn("当前追问", history_part)
+            self.assertNotIn(digest(cur_img), history_part)
+            self.assertIn("当前追问", current_tail)
 
 
 if __name__ == "__main__":

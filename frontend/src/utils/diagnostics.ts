@@ -35,17 +35,19 @@ export function buildSanitizedDiagnosticExport(
       }
     : null;
 
-  const failureRetention: FailureRetention | null = monitor?.failure_retention
+  const retentionSource = monitor?.failure_retention;
+  const failureRetention: FailureRetention | null = retentionSource
     ? {
-        ttl_seconds: monitor.failure_retention.ttl_seconds,
-        max_events: monitor.failure_retention.max_events,
-        max_bytes: monitor.failure_retention.max_bytes,
-        storage_state: monitor.failure_retention.storage_state,
+        ttl_seconds: retentionSource.ttl_seconds,
+        max_events: retentionSource.max_events,
+        max_bytes: retentionSource.max_bytes,
+        storage_state: retentionSource.storage_state,
       }
     : null;
 
-  const failureEvents = Array.isArray(monitor?.failure_events)
-    ? monitor.failure_events.map((row: FailureEvent) => ({
+  const rawFailureEvents = monitor?.failure_events;
+  const failureEvents = Array.isArray(rawFailureEvents)
+    ? rawFailureEvents.map((row: FailureEvent) => ({
         recorded_at: row.recorded_at ?? null,
         status: row.status ?? null,
         error_code: row.error_code ?? null,
@@ -72,6 +74,7 @@ export function buildSanitizedDiagnosticExport(
       }))
     : null;
 
+  const windowSource = monitor?.window;
   const report = setup?.report;
   const env = setup?.environment;
 
@@ -80,10 +83,10 @@ export function buildSanitizedDiagnosticExport(
     exported_at: new Date().toISOString(),
     monitor_schema_version: monitor?.schema_version ?? null,
     sampled_at: monitor?.sampled_at ?? null,
-    window: monitor?.window
+    window: windowSource
       ? {
-          hours: monitor.window.hours,
-          max_turns_per_instance: monitor.window.max_turns_per_instance,
+          hours: windowSource.hours,
+          max_turns_per_instance: windowSource.max_turns_per_instance,
         }
       : null,
     routing,
