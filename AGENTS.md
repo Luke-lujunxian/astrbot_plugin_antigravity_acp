@@ -1,6 +1,6 @@
 # Agent 工作入口
 
-本仓库把官方 `agy acp`（stdio）接为 AstrBot 原生 `agy_acp` Provider。当前发布基线 **v0.7.5**，Python **3.11+**，AstrBot **`>=4.29.4,<4.30`**；版本以 [metadata.yaml](metadata.yaml) 为准。识别 4.30 的已知宿主提示文案，不代表兼容 4.30 的 runner/API。Hermes、Codex、AGY 从本页按任务读取资料，无需通读历史施工书。
+本仓库把官方 `agy acp`（stdio）接为 AstrBot 原生 `agy_acp` Provider。当前版本基线 **v0.8.0**，Python **3.11+**，AstrBot **`>=4.29.4,<4.30`**；版本以 [metadata.yaml](metadata.yaml) 为准。识别 4.30 的已知宿主提示文案，不代表兼容 4.30 的 runner/API。Hermes、Codex、AGY 从本页按任务读取资料，无需通读历史施工书。
 
 ## 必须保持的边界
 
@@ -8,7 +8,7 @@
 - 认证由官方 CLI 管理。文件桥只核验元数据并创建单文件链接；不得读取、解析、复制或记录 OAuth 内容、系统凭据。授权 URL/code/ticket、代理密码、完整提示词与敏感工具参数不得进入日志、报告或聊天。
 - ACP 仅为当前活跃 prompt 中已观测、名称/ID/状态匹配的快照 MCP 调用选择唯一有效 `allow_once`；不得永久授权。跨会话、过期、重复、未知和内置工具继续拒绝。放行不等于执行，宿主仍负责审批、原始 schema 校验、预算与执行隔离。
 - 模型适配 schema 与宿主原始 schema 分开保存；执行按原始契约校验，两者均参与快照指纹。不得为兼容 Gemini 收窄宿主允许的数组值。
-- 已输出正文/思考或交接工具后失败，保留 `no_retry` + `no_fallback`，禁止自动重放。修改宿主兼容层须核对声明版本的真实 runner，不能只依赖异常属性。
+- 已输出可见正文、交接工具或工具结果续轮后失败，保留 `no_retry` + `no_fallback`，禁止自动重放。仅思考/进度且未交接、未执行工具的失败可保留显式 fallback 资格；不得仅凭无正文推断无副作用。修改宿主兼容层须核对声明版本的真实 runner，不能只依赖异常属性。
 - system 只过滤已知失实宿主能力声明，并对结构锚定的 Safe Mode 已知单句做 #19 等义改写；保留其他人格与用户历史，不做通用删词或净化重试。`content_429_candidate` 仅为候选遥测，不能证明 Google 内容过滤、风控或额度根因。
 - 无生成自检、保存、真实生成分别验收；缺失 usage/退出码是未知，不能填成 0 或成功。监控只读，不得额外发模型请求或泄漏原始会话身份。
 
@@ -20,6 +20,8 @@
 4. 检查文档与源码一致并交付差异、测试结果、限制和回滚方式。文档任务仅改文档，不顺带改运行行为，不预设下个版本号。
 
 ## 按需阅读
+
+- #30/#32 当前实现见 [前端交接](docs/acp-30-frontend-handoff.md)、[后端交接](docs/acp-32-backend-handoff.md) 和 [离线 QA](docs/acp-30-32-offline-qa.md)（历史阶段证据）；实机与视觉验收仍见 [#31](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/31)。
 
 | 任务 | 首读 | 关键入口 |
 | --- | --- | --- |
@@ -36,7 +38,7 @@
 
 ```sh
 python -m unittest discover -s tests -v
-node --test tests/setup.test.mjs
+(cd frontend && npm ci --ignore-scripts && npm run typecheck && npm run build:ci && npm run verify:dist)
 python -m compileall -q main.py agy_provider tests
 git diff --check
 ```

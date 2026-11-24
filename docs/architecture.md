@@ -1,6 +1,6 @@
 # 当前架构与源码导航
 
-适用于发布基线 **v0.7.5**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
+适用于版本基线 **v0.8.0**。运行范围为 AstrBot **`>=4.29.4,<4.30`**、Python **3.11+**；4.30 已知文案过滤不是宿主兼容声明。项目约束先读 [AGENTS.md](../AGENTS.md)，排错按 [SOP](troubleshooting.md)，验证按 [测试规范](testing.md)。本页描述当前契约，历史实现与各环境验收见 [CHANGELOG](../CHANGELOG.md)。
 
 版本核对：[metadata.yaml](../metadata.yaml) 与 [_version.py](../agy_provider/_version.py) 的 `PLUGIN_VERSION`（由 [main.py](../main.py) 注册、[transport.py](../agy_provider/transport.py) clientInfo、[mcp_bridge.py](../agy_provider/mcp_bridge.py) serverInfo 统一引用，并由 [test_release_hygiene.py](../tests/test_release_hygiene.py) 强校验一致），以这两个文件为准；本文不重复写死具体版本号。排障仍需同时记录部署 SHA 与各字段，不能仅凭标签判断代码版本。
 
@@ -51,7 +51,7 @@ flowchart LR
 - `sessions.compare_history()` 比较 `host_expected` 与新宿主历史；`sent_window` 单独记录实际发送窗口。`exact`、`host_trim`、`rewrite`、`append_gap`、`unknown` 是诊断关系，不能把相同尾部当作安全复用证明。
 - `session_reuse_mode=strict` 为默认；`structured` 仅在 `messages.normalize()` 验证 `agy_context_parts` 后，把可信 transient 放入用户轮。无效/缺失分段不能升级为可信数据。模型、档位、稳定 system、工具指纹或历史语义变化可触发重建。
 - [context_usage.py](../agy_provider/context_usage.py) 连续比较同一窗口的可信 `used/size`。默认峰值至少 64000、当前值严格低于峰值 50% 时标记疑似压缩；先完成本轮及工具回填，再退休。缺失/无效字段及窗口切换中断比较，不能据此证明上游压缩或计算账单。
-- [provider.py](../agy_provider/provider.py) 在部分正文/思考或工具交接后失败时设置 `no_retry`、`no_fallback`；[host_compat.py](../agy_provider/host_compat.py) 补足宿主后续 fallback 入口的约束。输出前的去重/冷却仍可让宿主 fallback；不缓存成功答案，不自动续写或重放工具。
+- [provider.py](../agy_provider/provider.py) 在可见正文、工具交接或工具结果续轮后失败时设置 `no_retry`、`no_fallback`；[host_compat.py](../agy_provider/host_compat.py) 补足宿主后续 fallback 入口的约束。仅思考/进度且未交接工具的失败可保留显式 fallback 资格；输出前的去重/冷却仍可让宿主 fallback；不缓存成功答案，不自动续写或重放工具。
 - 池默认 `max_concurrent=2`、`max_sessions=4`、`max_pending=16`、`idle_ttl=600` 秒。POSIX 使用独立进程组；Windows 尽早绑定 kill-on-close Job Object，失败时回退 `taskkill /T`。spawn/绑定并非原子操作，不能宣称宿主被强杀后任何平台都绝无残留。
 
 ## MCP 的两层权限与两份 schema
@@ -86,13 +86,15 @@ flowchart LR
 
 ## 用量、认证与 WebUI
 
+- v0.8.0 的 [routing.py](../agy_provider/routing.py) 区分配置主项、解析主项及服务观测；[failure_events.py](../agy_provider/failure_events.py) 提供有界脱敏持久失败诊断。当前输入与历史封套分离，历史媒体占位不计入当前附件预算。
+
 - `usage_status=reported` 才是取得计费 usage；`not_sent` 表示未发模型 prompt，可记录 0；`unavailable` 表示发出但上游未报告，用 `null/未知`。上下文占用不等于计费输入、缓存率或账号余额。
 - 每实例内存保留最近 24 小时最多 100 轮，重启清空；持久 `agy.turn` 日志默认关闭（`cost_log_enabled=false`）。原始会话身份不暴露，监控对嵌套字段做白名单投影。
 - 文件桥只校验官方认证源的元数据，链接单个 `agy/antigravity-oauth-token`，不读取/复制内容。源缺失可尝试原生认证后端；不安全的现有文件为 `AUTH_BRIDGE`，不能靠忽略校验修复。
 - [login.py](../agy_provider/login.py) 把单行 code 交给官方 `agy acp --login` stdin；不解析完整 localhost 回调 URL。登录进程退出 0 后仍要通过 ACP/目录复检。URL/ticket 仅返回发起者，不落盘、不写业务日志。
-- [views/setup/app.js](../views/setup/app.js) 使用宿主注入的 `window.AstrBotPluginView`：先 `ready()`，再调用相对 `setup/status` 等 endpoint；不访问父页面 DOM、Dashboard token 或 LocalStorage。设置 POST 使用当前 nonce，后台动作须轮询终态；模型已保存但全局默认切换失败应显示部分成功。
+- [frontend/src/](../frontend/src/)（构建产物 [views/setup/](../views/setup/)） 使用宿主注入的 `window.AstrBotPluginView`：先 `ready()`，再调用相对 `setup/status` 等 endpoint；不访问父页面 DOM、Dashboard token 或 LocalStorage。设置 POST 使用当前 nonce，后台动作须轮询终态；模型已保存但全局默认切换失败应显示部分成功。
 - `GET monitor/status` 只收集现有实例快照，不启动 Runtime/CLI；仅配置中的 Dashboard 管理员可读，匿名 401，API Key/其他身份 403，停用 503，响应 `Cache-Control: no-store`。聊天管理员与 Dashboard 身份不是同一鉴权入口。
-- 视图测试使用 DOM/bridge 替身；真实 iframe、主题、布局、剪贴板与 HTTP 鉴权需要另验。不要用静态页面预览替代宿主验收。
+- 旧 DOM/bridge 测试仅适用于已移除的 app.js；新版前端离线检查覆盖类型、构建与产物一致性，真实 iframe、主题、布局、剪贴板与 HTTP 鉴权需要另验。不要用静态页面预览替代宿主验收。
 - 宿主把视图放进 `sandbox="allow-scripts allow-forms allow-downloads"` 的 iframe，且多数部署是 `http://<ip>`（非安全上下文）：`navigator.clipboard` 常为 `undefined`、`window.open` 可能被拦截。复制必须按「Clipboard API → 手势内同步 `execCommand` → 选中文本」降级，且轮询渲染不得重写未变化的 `input.value`（会折叠用户选区）。以上是宿主约束，不是插件缺陷，改动视图时保持不变式。
 
 ## 关键配置
@@ -105,7 +107,7 @@ flowchart LR
 | 代理 | `proxy_mode=inherit`；支持 `custom/direct`，custom 仅注入 CLI 子进程；容器内 localhost 指容器 |
 | 工具 | `enable_tools=false`；还需宿主 `tool_use`、实际 ToolSet、身份/取消信号；`agy_tools_mode=inherit/chat/tools`，chat 无工具，tools 不能绕过总闸；`tool_choice` 仅 auto/none |
 | 工具预算 | 16 次、并发 1、审批 60 秒、执行 120 秒、结果总计 262144 字节；超限报错，不静默截断 |
-| 图片 | `enable_images=false`；还需宿主 image 与 CLI image 能力；PNG/JPEG 默认最多 8 张（可配 1–16），PNG 支持 8 位灰度/索引色/RGB/RGBA 并在校验 CRC 后剥离 `zTXt`/`iCCP`/`iTXt` 辅助块，字节/像素有界，本地目录必须在 `media_roots`；音频/视频/PDF/生成图片未接入。会话重建时，仅最新用户消息中的图片作为附件发送，历史图片在转录中仅保留哈希和 `historical` 标记。**v0.7.4 的剩余限制**：`prepare_media()` 仍会预检历史图片、占用本轮图片总数及字节预算；旧源失效或长会话累计图片过多可能在生成前失败，详见 [排障 SOP](troubleshooting.md#工具图片与监控)。 |
+| 图片 | `enable_images=false`；还需宿主 image 与 CLI image 能力；PNG/JPEG 默认最多 8 张（可配 1–16），PNG 支持 8 位灰度/索引色/RGB/RGBA 并在校验 CRC 后剥离 `zTXt`/`iCCP`/`iTXt` 辅助块，字节/像素有界，本地目录必须在 `media_roots`；音频/视频/PDF/生成图片未接入。会话重建时，仅最新用户消息中的图片作为附件发送，历史图片在转录中仅保留哈希和 `historical` 标记。v0.8.0 历史图片仅保留占位与指纹，不占本轮真实图片预算；当前图片仍执行来源、字节、像素及能力校验，详见 [排障 SOP](troubleshooting.md#工具图片与监控)。 |
 | 思考档位 | 调用 `agy_thought_level` 优先于 Provider `custom_extra_body`；选出的 default 继承全局 `thought_level`，全局也 default 才用 CLI 默认；始终校验当前模型目录/选项，不硬编码模型 ID |
 | 历史/输出 | `history_bytes=160000`、`max_output_bytes=4194304`；不宣称原样发送无限历史，采样参数 temperature/top_p/max_tokens 无对应透传保证 |
 | 组件实验 | `agy_customizations_mode=inherit`；minimal 仅在已探测支持参数的工具默认 Agent 启用，真实 MCP/A-B 仍需另验；不自动下载安装/热替换 CLI |
@@ -127,7 +129,7 @@ flowchart LR
 | 登录、自检、模型保存 | [auth.py](../agy_provider/auth.py)、[login.py](../agy_provider/login.py)、[probe.py](../agy_provider/probe.py)、[onboarding.py](../agy_provider/onboarding.py) | [test_auth_config.py](../tests/test_auth_config.py)、[test_login.py](../tests/test_login.py)、[test_diagnostics.py](../tests/test_diagnostics.py)、[test_onboarding.py](../tests/test_onboarding.py) |
 | 工具桥认证、畸形/过期调用 | [bridge_transport.py](../agy_provider/bridge_transport.py)、[tools.py](../agy_provider/tools.py) | [test_bridge_hardening.py](../tests/test_bridge_hardening.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
 | 用量未知、上下文、监控权限/隐私 | [telemetry.py](../agy_provider/telemetry.py)、[monitoring.py](../agy_provider/monitoring.py) | [test_telemetry.py](../tests/test_telemetry.py)、[test_monitoring.py](../tests/test_monitoring.py) |
-| 设置页/主题/后台状态 | [views/setup/](../views/setup/)、[onboarding.py](../agy_provider/onboarding.py) | [setup.test.mjs](../tests/setup.test.mjs)、[test_onboarding.py](../tests/test_onboarding.py) |
+| 设置页/主题/后台状态 | [views/setup/](../views/setup/)、[onboarding.py](../agy_provider/onboarding.py) | [前端构建校验](../frontend/scripts/verify-dist.mjs)、[test_onboarding.py](../tests/test_onboarding.py)；实机 #31 |
 | 图片被拒或未传入 | [media.py](../agy_provider/media.py) | [test_media.py](../tests/test_media.py) |
 
 按本表找文件后，用 `rg -n '符号或错误码' agy_provider tests` 定位；行号随提交变化，不以历史 issue 的旧行号替代当前源码。

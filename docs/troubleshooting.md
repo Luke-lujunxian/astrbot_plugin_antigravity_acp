@@ -1,13 +1,13 @@
 # Agent 排障 SOP
 
-适用基线 **v0.7.5 / AstrBot `>=4.29.4,<4.30`**。安全边界见 [AGENTS.md](../AGENTS.md)，源码/测试映射见 [故障定位索引](architecture.md#故障定位索引)。以下流程不要求读取任何凭据或完整人格内容。
+适用基线 **v0.8.0 / AstrBot `>=4.29.4,<4.30`**。安全边界见 [AGENTS.md](../AGENTS.md)，源码/测试映射见 [故障定位索引](architecture.md#故障定位索引)。以下流程不要求读取任何凭据或完整人格内容。
 
 ## 先确定失败阶段
 
 1. 记录插件/宿主/Python/CLI 版本、部署方式、AstrBot 实际系统用户、容器内路径、请求模式及模型/档位；区分“最初出错提交”和“当前排查提交”。
 2. 管理员执行 `/agy doctor` 或在首次设置页重新检测。收集脱敏的 `stage`、`error_code`、CLI `exit_code`；只收必要字段，不粘贴整份环境变量、配置、stdout/stderr 或授权材料。
 3. 分开判断：发现/启动 CLI → 官方登录 → `initialize` → `session/new` / 目录 → 保存 Provider → `session/prompt` 生成 → MCP 许可/宿主执行/回填 → 最终正文。某阶段通过不能代替下一阶段通过。
-4. 失败后先检查本轮是否已有正文、thought 或工具交接；有则停止自动重试/fallback，避免副作用重复。先诊断，不以重新登录、重装、清空目录或放开 CLI 内置能力作为通用修复。
+4. 失败后先检查本轮是否已有可见正文、工具交接或工具结果续轮；有则停止自动重试/fallback，仅思考/进度且未交接时按显式资格处理，避免副作用重复。先诊断，不以重新登录、重装、清空目录或放开 CLI 内置能力作为通用修复。
 
 `/agy setup` 提供设置入口；`/agy use <provider_id>` 只更改命令所在目标会话的偏好。聊天命令需要聊天管理员身份；普通用户无响应不等于 CLI 故障。
 
@@ -105,9 +105,10 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 
 - 工具/图片要同时开启插件总闸和宿主对应 modalities，修改插件设置后重载。工具还要有真实 ToolSet、稳定身份和取消信号；`tool_choice=required` 或指定函数不受支持。chat 模式不会注入工具。
 - 图片还需 CLI image 能力；默认 8 张是可配置值而非固定硬上限。校验 PNG/JPEG 的真实编码，限制像素/字节，下载遵守 DNS/IP/重定向 SSRF 边界，本地路径限定 `media_roots`。宿主提前过滤的图片无法由 Provider 恢复。
-- **v0.7.4 图片修复的边界（#24）**：会话重建时，`prompt_blocks()` 仅附带当前用户轮的图片，旧图改为哈希占位；但 `prepare_media()` 仍对历史消息中的图片源逐一读取、验证并计入图片数量/字节限制。旧图失效或长历史累积过多可能在发给 AGY 之前报 `IMAGE*`/预算错误；这不是已修复的重复发送，也不能靠调高预算或放宽 SSRF/本地目录边界作为通用修复。优先收集脱敏的消息数、历史图片数、源类型、具体错误码，见 [计划状态索引](plan-status.md#待处理与待验证)。
+- **历史图片（#24 / #32）**：v0.8.0 会话重建只附带当前用户轮图片，历史图使用占位与指纹，不再占用当前真实附件预算。当前图片仍执行源、能力及预算校验；排障收集脱敏的消息数、历史/当前图片数、源类型和错误码，不放宽 SSRF/本地目录边界。
 - `/agy cost` 和 `monitor/status` 只读本地样本。实时池、近 24 小时、最近上下文采样是不同口径；未知 usage/占用不能显示成 0 或余额。重启后无历史不代表从未消耗。
 - monitor 返回 401/403 时核对 Dashboard 配置管理员；API Key 被该 endpoint 明确拒绝，不关闭鉴权。不要把聊天管理员权限当作 Dashboard 身份。
+- 默认模型异常时分别核对配置主项、解析主项和服务观测；不要将已初始化实例视作当前服务。失败诊断按 #32 的有界脱敏记录核对。
 - WebUI 使用原生 iframe bridge、当前 nonce 与轮询终态；旧响应、登录归属、复制、窄屏/主题等按 [实机验收](testing.md#实机验收) 单独检查。
 - 面板复制按钮依赖「用户手势内」的同步降级链：宿主 iframe 为 `sandbox="allow-scripts allow-forms allow-downloads"`（无 `allow-same-origin`/`clipboard-write`），且面板多为 `http://<ip>:6185` 非安全上下文，`navigator.clipboard` 不存在属预期。只能先试 Clipboard API，再同步 `execCommand("copy")`，最后退回选中文本；不要改成 `await` 之后再复制，那会丢掉手势导致 `execCommand` 返回 false。授权链接无法新开窗口是宿主未授 `allow-popups`，页面只能提示改用复制。
 

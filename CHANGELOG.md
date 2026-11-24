@@ -1,5 +1,14 @@
 # 变更记录
 
+## 0.8.0（2026-11-24；实机验收待 #31）
+
+- **原生 Dashboard 重构（#30）**：Vue 3 / Vuetify 3 / TypeScript / Vite 六模块界面，使用宿主 Plugin Views Bridge、相对资源路径及本地字体/图标；保留 #28 的复制降级与轮询边界。
+- **模型路由（#32）**：默认模型保存同时校验 runner 配置与实际解析结果，区分配置主项、解析主项和服务观测；删除/停用前检查引用，扫描不完整时阻止操作。不全局修改宿主 resolver/delete_provider，不按同名模型自动迁移 ID。
+- **上下文与图片**：当前用户输入置于历史封套外，保持当前附件顺序；历史图片使用占位及指纹，不再占用本轮真实附件预算，保留当前图验证与会话复用边界。
+- **失败与副作用**：无有效正文、无工具交接的失败保留显式 fallback 资格；可见正文、工具交接及工具续轮失败禁止自动重放。工具前后分段过滤真实 CLI 告警，新增有界脱敏持久失败诊断，与 cost log 解耦。
+- **版本与分发**：统一 metadata、运行时单点版本常量与前端 package/lock；AstrBot `>=4.29.4,<4.30`，Python 3.11+，部署使用已构建的静态资源，无需 Node.js。
+- **验证与限制**：[#34](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/34) 最新实现提交 `107bef7` 的 [CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45379518123) 六组全部成功（Linux/Windows 前端构建一致性检查与 Python 3.11/3.12 回归）。旧 DOM 测试因旧 app.js 移除而跳过，不等同于新版交互验收。真实 AGY、AstrBot iframe、QQ、视觉与生产验收尚未执行（[#31](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/31)）；#32 §5 并发争用、池锁及专用 Agent 调查延期。建议先备份配置并在非生产环境验证；可回退至 v0.7.5。
+
 ## 0.7.5（正式发布，2026-11-22）
 
 - **修复 #28：设置面板复制按钮全部失效（含卡住 Google 登录）**：AstrBot 4.29.4 把插件页放进 `sandbox="allow-scripts allow-forms allow-downloads"` 的 iframe（无 `allow-same-origin`、无 `allow="clipboard-write"`、无 `allow-popups`），面板又通常经 `http://<ip>:6185` 访问（非安全上下文），此时 `navigator.clipboard` 为 `undefined`；原 `copy()` 只有 Clipboard API 一条路径，失败仅向页脚写一行小字。现改为三级降级：`navigator.clipboard?.writeText` → 点击手势内同步执行临时 `textarea` + `document.execCommand("copy")` → 两者都失败才选中原文并提示快捷键；4 类复制入口（安装命令、官方文档、授权链接、`复制命令`）均把按钮自身传入并就地显示「已复制 ✓ / 请手动复制」，`#copy-status` 改为底部居中浮层、3s 自动消失。授权链接新增「在新标签打开」，`window.open` 被 sandbox 拦截时明确提示改用复制。
