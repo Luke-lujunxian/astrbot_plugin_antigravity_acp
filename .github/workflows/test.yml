@@ -62,7 +62,8 @@ jobs:
 
   # One-shot v0.8.0 release, only after the exact release-preparation push passes CI.
   release_v080:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'chore(release): prepare v0.8.0'
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'chore(release): prepare v0.8.0'
     needs: [frontend, test]
     runs-on: ubuntu-latest
     permissions:
