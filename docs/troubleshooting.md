@@ -97,8 +97,8 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 - 登录入口是 WebUI 或官方 `agy acp --login`；不支持该参数时由用户在同环境交互运行 `agy`，之后重新检测。不默认推荐未经当前 CLI 核验的 `agy login`。
 - 当前后端仅接收去除首尾空白后 1–4096 字符的单行授权码，拒绝控制字符；**没有解析完整 localhost 回调 URL**。用户只在自己的设置页提交，不发到聊天/issue。URL 只对当前拥有者可见，总预算 300 秒、取 URL 最多 45 秒；插件重载会取消旧流程，旧 ticket 不复用。
 - 登录 CLI 退出 0 后还需 ACP 会话及模型目录复检；`auth_bridge=false` 只关闭文件桥，不保证隔离会话能使用钥匙串，也不是通用修复。
-- 模型来自账号实际目录，Provider 列表有缓存；保存会复检。切换模型后重置并读取档位选项，不能承诺每个模型都支持 low/medium/high。相同模型及相同配置档位才复用 Provider。
-- 保存结果非空但 `default_selected=false` / `action_error=HOST` 可能是部分成功；全局默认不覆盖已有会话独立偏好。检查目标聊天的 `/agy use`、实例启用状态和 agy_tools_mode。
+- 模型来自账号实际目录，前端按 `efforts_by_model` 缓存各模型思考档位；切换模型仅按缓存重置档位而不自动重发 `setup/check`，需刷新目录时点击「刷新目录」或「重新检测」，保存会复检。`setup/apply` 新建同配置组合前应核对查重；需更换已有实例的底层模型、思考或模式但保留原有 `/agy use` 及默认绑定 ID 时，在「模型管理」使用「编辑」（`setup/provider-update`，更换底层模型会在下轮重构会话上下文）。
+- 全局总闸（如 `enable_images`）或 `modalities` 出现漂移时，列表会标记「需同步」并弹出顶部恢复条，可通过「修复」/「一键同步」（`setup/provider-repair`）对齐合并配置。停用或删除当前全局默认实例前先经过 `setup/provider-impact` 检查引用，并在弹窗中选定 `migrate_default_to` 替代项（或显式置空触发二次确认）；保存结果非空但 `default_selected=false` / `action_error=HOST` 可能是部分成功，全局默认不覆盖已有会话独立偏好，排查目标聊天时结合 `/agy use`、实例启用状态与 `agy_tools_mode` 核对。
 - 旧名配置迁移须备份并避开宿主并发写；新配置存在则合并所需字段，不覆盖整份。禁用旧插件防止 `agy_acp` 重复注册，另查 command 包装脚本是否绑定旧数据目录。
 
 ## 会话复用与历史重写

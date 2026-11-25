@@ -7,11 +7,11 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-blue)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29.4%2C%3C4.30-orange)
-![Status](https://img.shields.io/badge/main-v0.8.2-brightgreen)
+![Status](https://img.shields.io/badge/main-v0.8.3-brightgreen)
 
 通过 Google 官方 `agy` 客户端内置的 ACP（Agent Client Protocol）协议，把 Antigravity 模型安全、稳定地接入 AstrBot，作为日常对话主力。
 
-> 💡 **主分支 v0.8.2（2026-11-25）** 修复 AstrBot 丢弃临时用户文本块后，每轮误报 `history_rewrite` 的问题。可通过下方主分支 ZIP 升级并重载插件，无需更改配置。[#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33)
+> 💡 **主分支 v0.8.3（2026-11-25）** 完成模型管理与路由交互重构（[#36](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/36) / [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）：默认首页保持「运行监控」并新增全局默认摘要条与异常恢复横幅；支持原地编辑（保留 `provider_id`）、配置漂移一键同步、受控默认迁移及「跟随全局」思考档位明示。可通过下方主分支 ZIP 或页面重装并重载插件。
 
 ---
 
@@ -114,6 +114,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 *(完整历史见 [`CHANGELOG.md`](./CHANGELOG.md))*
 
+- **v0.8.3**：重构「运行监控 / 模型管理 / 环境与认证」三标签页、新增原位编辑（`provider-update`）与配置漂移修复（`provider-repair`）、支持受控默认迁移及思考「跟随全局」明示（[#36](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/36) · [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）。
 - **v0.8.2**：修复临时用户文本导致的会话误重建，覆盖普通续聊及工具回填。[#35](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/35)
 - **v0.8.1**：替换为 feat/ui-redesign 原生可视化前端，兼容监控 v2 与复制降级，保留 v0.8.0 后端（实机待 #31）。
 - **v0.8.0**：原生 Dashboard 重构、默认模型路由核对、当前用户输入与历史分离、历史图片预算修复、无正文且未交接工具时的安全 fallback、持久失败诊断（[#34](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/34)；实机待 #31）。

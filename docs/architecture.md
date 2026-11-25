@@ -131,7 +131,7 @@ flowchart LR
 | 登录、自检、模型保存 | [auth.py](../agy_provider/auth.py)、[login.py](../agy_provider/login.py)、[probe.py](../agy_provider/probe.py)、[onboarding.py](../agy_provider/onboarding.py) | [test_auth_config.py](../tests/test_auth_config.py)、[test_login.py](../tests/test_login.py)、[test_diagnostics.py](../tests/test_diagnostics.py)、[test_onboarding.py](../tests/test_onboarding.py) |
 | 工具桥认证、畸形/过期调用 | [bridge_transport.py](../agy_provider/bridge_transport.py)、[tools.py](../agy_provider/tools.py) | [test_bridge_hardening.py](../tests/test_bridge_hardening.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
 | 用量未知、上下文、监控权限/隐私 | [telemetry.py](../agy_provider/telemetry.py)、[monitoring.py](../agy_provider/monitoring.py) | [test_telemetry.py](../tests/test_telemetry.py)、[test_monitoring.py](../tests/test_monitoring.py) |
-| 设置页/主题/后台状态 | [views/setup/](../views/setup/)、[onboarding.py](../agy_provider/onboarding.py) | [setup.test.mjs](../tests/setup.test.mjs)、[test_onboarding.py](../tests/test_onboarding.py)；实机 #31 |
+| 设置页/主题/后台状态/模型路由管理 | [views/setup/](../views/setup/)、[onboarding.py](../agy_provider/onboarding.py)、[routing.py](../agy_provider/routing.py) | [setup.test.mjs](../tests/setup.test.mjs)、[test_onboarding.py](../tests/test_onboarding.py)、[test_routing.py](../tests/test_routing.py)；实机 #31 |
 | 图片被拒或未传入 | [media.py](../agy_provider/media.py) | [test_media.py](../tests/test_media.py) |
 
 按本表找文件后，用 `rg -n '符号或错误码' agy_provider tests` 定位；行号随提交变化，不以历史 issue 的旧行号替代当前源码。

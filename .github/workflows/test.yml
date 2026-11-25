@@ -36,38 +36,37 @@ jobs:
       - name: Setup view interaction regressions
         run: node --test tests/setup.test.mjs
 
-  release_v082:
+  release_v083:
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.2 session reuse fix'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.3 model management & routing UI'
     needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Package and publish v0.8.2
+      - name: Package and publish v0.8.3
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          grep -Fx 'version: 0.8.2' metadata.yaml
-          grep -Fx 'PLUGIN_VERSION = "0.8.2"' agy_provider/_version.py
-          asset=astrbot_plugin_antigravity_acp_v0.8.2.zip
+          grep -Fx 'version: 0.8.3' metadata.yaml
+          grep -Fx 'PLUGIN_VERSION = "0.8.3"' agy_provider/_version.py
+          asset=astrbot_plugin_antigravity_acp_v0.8.3.zip
           git archive --format=zip --prefix=astrbot_plugin_antigravity_acp/ -o "$asset" "$GITHUB_SHA"
           unzip -t "$asset"
           for f in index.html app.js style.css; do unzip -Z1 "$asset" | grep -Fx "astrbot_plugin_antigravity_acp/views/setup/$f"; done
           if unzip -Z1 "$asset" | grep -E '/views/setup/assets/|/frontend/|/tests/|/docs/'; then exit 1; fi
-          cat > /tmp/v082-notes.md <<'NOTES'
-          ## v0.8.2 — 会话复用修复
+          cat > /tmp/v083-notes.md <<'NOTES'
+          ## v0.8.3 — ACP 模型管理与路由交互重构（#36）
 
-          - 修复 AstrBot 持久化时移除临时用户文本导致误报 history_rewrite、反复重建 ACP 会话的问题。
-          - 可确认的临时文本仍发送给模型，预期历史按宿主实际保存内容计算；真实历史编辑仍触发重建。
-          - 新增 strict、structured、思考块回放、真实历史编辑及工具回填路径回归。
-          - 保留 v0.8.1 可视化 UI 与既有后端修复。
+          - WebUI 调整为「运行监控（默认首页）/ 模型管理 / 环境与认证」三标签页：保留纯 SVG 三层监控图表与设计风格，新增单行全局默认摘要条与顶部异常恢复/漂移同步横幅。
+          - 模型管理保留「添加模型」弹窗，支持原地「编辑」（`provider-update` 保留原 `provider_id`）、思考「跟随全局（...）」明示、本地目录/思考档位缓存及「一键同步」（`provider-repair`）。
+          - 停用或删除全局默认实例前经 `provider-impact` 预览影响并支持原子迁移默认模型（`migrate_default_to`）；修复重载恢复后 `curr_provider_inst` 指针同步与合并配置模态校验。
 
-          感谢 #33 提交者提供详细排查与补丁参考。完整改动见 [PR #35](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/35) 和 [CHANGELOG](https://github.com/sl251/astrbot_plugin_antigravity_acp/blob/v0.8.2/CHANGELOG.md)。
-          Windows / Ubuntu 离线 CI 通过后发布；真实 AGY 环境复用率、缓存收益及生产效果仍待验证。支持 AstrBot >=4.29.4,<4.30、Python 3.11+。可回退至 v0.8.1。
+          完整改动见 [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)、[Issue #36](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/36) 和 [CHANGELOG](https://github.com/sl251/astrbot_plugin_antigravity_acp/blob/v0.8.3/CHANGELOG.md)。
+          Windows / Ubuntu 离线 CI 通过后发布；支持 AstrBot >=4.29.4,<4.30、Python 3.11+。可回退至 v0.8.2。
           NOTES
-          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v082-notes.md
-          gh release create v0.8.2 "$asset" --target "$GITHUB_SHA" --title "v0.8.2" --notes-file /tmp/v082-notes.md --latest
+          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v083-notes.md
+          gh release create v0.8.3 "$asset" --target "$GITHUB_SHA" --title "v0.8.3" --notes-file /tmp/v083-notes.md --latest

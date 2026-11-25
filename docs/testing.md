@@ -60,7 +60,15 @@ python -m unittest tests.test_prompt_images tests.test_media tests.test_sessions
 python -m unittest tests.test_routing tests.test_b06_side_effects tests.test_b07_b08_regressions tests.test_failure_events -v
 ```
 
-v0.8.1 恢复原生 DOM 回归，需实际执行测试；覆盖监控 v2、复制降级等，真实 iframe/视觉测试待 #31。
+v0.8.1 恢复原生 DOM 回归，v0.8.3（#36）在此基础上覆盖三标签页切换、路由与配置漂移告警、本地目录缓存、弹窗防覆盖、原地编辑 `provider-update`、批量同步 `provider-repair` 与受控迁移 `provider-impact` 等交互，真实 iframe/多端视觉回归仍需在宿主中单独检查。
+
+### 模型管理与路由交互（#36）
+
+```sh
+python -m unittest tests.test_onboarding tests.test_routing tests.test_main_init -v
+node --check views/setup/app.js
+node --test tests/setup.test.mjs
+```
 
 ### 会话复用（#33）
 

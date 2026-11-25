@@ -1,5 +1,11 @@
 # 变更记录
 
+## 0.8.3（2026-11-25）
+
+- **WebUI 三标签页与交互重构（#36 / [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）**：保留 AstrBot 4.x 原生风格与完整纯 SVG 三层「运行监控」默认首页，新增单行全局默认摘要条与顶部隐式回退（`#route-alert`）/ 配置漂移（`#drift-alert`）告警横幅；「模型管理」新增「添加模型」弹窗入口与原地「编辑」弹窗（`setup/provider-update` 保留原 `provider_id` 避免旧绑定失效），思考默认档位按当前全局配置明示为 `跟随全局（CLI默认 / 低 / 中 / 高）`；切换下拉模型改用本地 `efforts_by_model` 缓存并暂停自动 `setup/check`，弹窗打开期间禁止后台轮询覆盖表单字段，暂态检测失败保留已有目录缓存。
+- **路由与配置一致性修复**：`agy_provider/routing.py`、`onboarding.py` 与 `main.py` 统一基于合并配置读取实例、计算 `modalities`（移除残留 `audio` 并对齐全局 `enable_images`）、统计非默认会话 Profile 覆盖数并检测漂移；新增 `setup/provider-repair`（单实例/批量同步修复）与 `setup/provider-impact` 受控下线流程（停用/删除当前全局默认时支持原子 `migrate_default_to` 与 `force_confirm` 显式确认）；`setup/apply` 支持 `create_only` 避免覆盖同底层模型配置；初始化与重载恢复后同步校准 `curr_provider_inst` 指针，同时保持持有 `manager.resource_lock` 期间不重入宿主更新/删除方法。
+- **验证**：全量离线 Python 回归 303 项运行通过（11 项平台/权限条件跳过）、Node 前端交互/监控回归 30/30、`compileall`、`check_sensitive.py` 与 `git diff --check` 全部通过（PR #37 Ubuntu/Windows × Python 3.11/3.12 矩阵通过）；已在测试宿主（AstrBot 4.29.4 容器）预部署验证零报错加载与服务启动，仍未覆盖真实 CLI 批量工具生成、macOS 及 AstrBot 4.30 环境。
+
 ## 0.8.2（2026-11-25）
 
 - 修复 AstrBot 在持久化历史时移除临时用户文本，导致后续轮次误报 `history_rewrite` 并重建 ACP 会话的问题。可确认的临时文本仍发给模型，预期回放按宿主实际保存的内容计算。真实用户编辑仍触发重建。[#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33) · [PR #35](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/35)
