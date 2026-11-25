@@ -26,6 +26,7 @@ from agy_provider.routing import (
     provider_impact,
     routing_snapshot,
     select_default,
+    sync_current_provider_pointer,
 )
 from agy_provider.telemetry import TelemetryTracker, start_diagnostics, stop_diagnostics
 
@@ -434,7 +435,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 await service.job
                 self.assertEqual(service.action_error, "CONFIG")
 
-        # Zero-reference ACP still cannot delete/disable because session_scan == "unknown" (incomplete_scan)
+        # 无引用 ACP 未确认 force_confirm 时仍受阻，但预览标明可确认放行且无需迁移
         unreferenced_id = "acp_unref"
         manager.providers_config.append({
             "id": unreferenced_id, "type": "agy_acp", "enable": True, "model": "gemini-3.1-pro-high",
@@ -442,8 +443,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         })
         manager._rebuild_loaded_instances()
         imp_unref = provider_impact(manager, unreferenced_id, service.overrides)
-        self.assertFalse(imp_unref["can_delete"])
-        self.assertFalse(imp_unref["can_disable"])
+        self.assertTrue(imp_unref["can_delete"])
+        self.assertTrue(imp_unref["can_disable"])
+        self.assertFalse(imp_unref["requires_migration"])
         self.assertEqual(imp_unref["block_reason"], "incomplete_scan")
         self.assertEqual(imp_unref["session_scan"], "unknown")
         self.assertEqual(imp_unref["profiles_scanned"], 2)
@@ -452,7 +454,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(imp_chat["block_reason"], "referenced")
         self.assertEqual(imp_chat["references"]["auxiliary"], 2)
 
-        # Controlled delete and disable are both blocked (REFERENCE_BLOCKED) and never touch siblings
+        # 未携带 force_confirm 的直接删除/停用继续返回 REFERENCE_BLOCKED，不修改旁系实例
         for action, extra in (("provider-delete", {}), ("provider-toggle", {"enabled": False})):
             self.web_mod._raw_body = json.dumps({"csrf": service.csrf, "provider_id": unreferenced_id, "confirm": True, **extra}).encode("utf-8")
             resp = await service.handle(action)
@@ -462,6 +464,27 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(service.result["applied"])
             self.assertIn(unreferenced_id, manager.inst_map)
 
+        # 携带 force_confirm=True 后允许停用与删除无默认引用实例
+        self.web_mod._raw_body = json.dumps({
+            "csrf": service.csrf, "provider_id": unreferenced_id,
+            "confirm": True, "enabled": False, "force_confirm": True,
+        }).encode("utf-8")
+        resp_dis = await service.handle("provider-toggle")
+        self.assertEqual(resp_dis["status_code"], 200)
+        await service.job
+        self.assertTrue(service.result["applied"])
+        self.assertNotIn(unreferenced_id, manager.inst_map)
+
+        self.web_mod._raw_body = json.dumps({
+            "csrf": service.csrf, "provider_id": unreferenced_id,
+            "confirm": True, "force_confirm": True,
+        }).encode("utf-8")
+        resp_del = await service.handle("provider-delete")
+        self.assertEqual(resp_del["status_code"], 200)
+        await service.job
+        self.assertTrue(service.result["applied"])
+        self.assertFalse(any(r.get("id") == unreferenced_id for r in manager.providers_config))
+
         # Controlled enable succeeds cleanly on disabled ACP
         self.web_mod._raw_body = json.dumps({"csrf": service.csrf, "provider_id": "acp_disabled", "confirm": True, "enabled": True}).encode("utf-8")
         resp = await service.handle("provider-toggle")
@@ -469,6 +492,40 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         await service.job
         self.assertTrue(service.result["applied"])
         self.assertIn("acp_disabled", manager.inst_map)
+
+        # 设为默认后，未提供迁移目标时阻止停用/删除；提供 migrate_default_to 后原子迁移并下线
+        await select_default(manager, "acp_tools")
+        imp_primary = provider_impact(manager, "acp_tools", service.overrides)
+        self.assertFalse(imp_primary["can_delete"])
+        self.assertTrue(imp_primary["requires_migration"])
+        self.assertTrue(any(c["id"] == "acp_disabled" for c in imp_primary["replacement_candidates"]))
+
+        self.web_mod._raw_body = json.dumps({
+            "csrf": service.csrf, "provider_id": "acp_tools",
+            "confirm": True, "enabled": False, "force_confirm": True,
+        }).encode("utf-8")
+        await service.handle("provider-toggle")
+        await service.job
+        self.assertEqual(service.action_error, "REFERENCE_BLOCKED")
+        self.assertIn("acp_tools", manager.inst_map)
+
+        self.web_mod._raw_body = json.dumps({
+            "csrf": service.csrf, "provider_id": "acp_tools",
+            "confirm": True, "enabled": False, "force_confirm": True,
+            "migrate_default_to": "acp_disabled",
+        }).encode("utf-8")
+        await service.handle("provider-toggle")
+        await service.job
+        self.assertTrue(service.result["applied"])
+        self.assertNotIn("acp_tools", manager.inst_map)
+        self.assertEqual(manager.acm.default_conf["agent_runner"]["config"]["model"]["provider_id"], "acp_disabled")
+        self.assertEqual(routing_snapshot(manager)["resolution_reason"], "configured_primary")
+
+        # 验证 sync_current_provider_pointer 修正重载后漂移的内存指针
+        manager.curr_provider_inst = manager.inst_map["zhipu_vlm"]
+        self.assertTrue(sync_current_provider_pointer(manager))
+        self.assertIs(manager.curr_provider_inst, manager.inst_map["acp_disabled"])
+        await select_default(manager, "acp_disabled")
 
         # Missing confirm or extra field rejected with 400
         self.web_mod._raw_body = json.dumps({"csrf": service.csrf, "provider_id": "acp_disabled", "confirm": False, "enabled": True}).encode("utf-8")
@@ -478,10 +535,9 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         # Dangling detection: after native delete_provider removes primary without clearing agent_runner,
         # routing_snapshot detects primary_exists=False and implicit_first_provider without fabricating primary.
-        await select_default(manager, "acp_tools")
-        await manager.delete_provider(provider_id="acp_tools")
+        await manager.delete_provider(provider_id="acp_disabled")
         dangling_snap = routing_snapshot(manager)
-        self.assertEqual(dangling_snap["configured_primary_id"], "acp_tools")
+        self.assertEqual(dangling_snap["configured_primary_id"], "acp_disabled")
         self.assertIs(dangling_snap["primary_exists"], False)
         self.assertEqual(dangling_snap["resolution_reason"], "implicit_first_provider")
 

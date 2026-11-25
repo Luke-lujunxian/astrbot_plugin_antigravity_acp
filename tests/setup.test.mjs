@@ -35,7 +35,11 @@ class Element {
     this.children = children;
     if (this.tag === "select") this.value = children[0]?.value || "";
   }
-  append(...children) {this.children.push(...children);}
+  append(...children) {
+    this.children.push(...children.map(c => (typeof c === "string" || typeof c === "number")
+      ? {tag: "#text", textContent: String(c), children: [], attributes: {}}
+      : c));
+  }
   appendChild(child) {child.parent = this; this.children.push(child); return child;}
   remove() {if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this);}
   setAttribute(name, value) {
@@ -52,8 +56,12 @@ class Element {
 }
 
 async function boot(initial = base()) {
-  const elements = new Map([...html.matchAll(/<([\w-]+)[^>]*\bid="([^"]+)"/g)]
-    .map(([, tag, id]) => [id, new Element(tag)]));
+  const elements = new Map([...html.matchAll(/<([\w-]+)([^>]*)\bid="([^"]+)"([^>]*)>/g)]
+    .map(([, tag, pre, id, post]) => {
+      const el = new Element(tag);
+      if (/\bhidden\b/.test(`${pre} ${post}`)) el.hidden = true;
+      return [id, el];
+    }));
   const handlers = {};
   const requests = [];
   const bridge = {
@@ -146,7 +154,9 @@ test("duplicate actions are blocked and nonce is sent", async () => {
 test("late status response cannot overwrite a newer save", async () => {
   const ui = await boot();
   let release;
-  ui.bridge.apiGet = () => new Promise(resolve => {release = resolve;});
+  ui.bridge.apiGet = async endpoint => endpoint === "setup/status"
+    ? new Promise(resolve => {release = resolve;})
+    : {schema_version: 2, instances: []};
   const poll = ui.api.poll();
   const saved = base(); saved.result = {provider_id: "saved-id", default_selected: false};
   saved.providers = [{id: "saved-id", model: "gemini-test", enabled: true}];
@@ -189,28 +199,39 @@ test("page exit clears sensitive fields and stops polling", async () => {
   await ui.api.poll();
 });
 
-test("model change resets thought effort and requests fresh catalog", async () => {
-  const ui = await boot();
+test("model change resets thought effort from cache without immediate probe and refresh checks catalog", async () => {
+  const data = base();
+  data.report.models = [{id: "gemini-test", name: "Gemini Test"}, {id: "gemini-other", name: "Gemini Other"}];
+  data.efforts_by_model = {"gemini-test": ["low", "high"], "gemini-other": ["medium"]};
+  const ui = await boot(data);
+  ui.get("open-add-model").onclick();
   ui.get("effort").value = "high";
+  ui.get("model").value = "gemini-other";
   ui.get("model").onchange();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(ui.requests[0].endpoint, "setup/check");
-  assert.equal(ui.requests[0].body.model, "gemini-test");
+  assert.equal(ui.requests.length, 0);
   assert.equal(ui.get("effort").value, "default");
+  assert.deepEqual(ui.get("effort").children.map(option => option.value), ["default", "medium"]);
+
+  ui.get("refresh-catalog").onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.requests[0].endpoint, "setup/check");
 });
 
-test("model save sends selected tools_mode with chat default", async () => {
+test("model save sends selected tools_mode with chat default and create_only flag", async () => {
   const ui = await boot();
   assert.equal(ui.get("tools-mode").value, "chat");
   ui.get("model-form").onsubmit({preventDefault() {}});
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(ui.requests[0].endpoint, "setup/apply");
   assert.equal(ui.requests[0].body.tools_mode, "chat");
+  assert.equal(ui.requests[0].body.create_only, true);
 
   ui.get("tools-mode").value = "tools";
   ui.get("model-form").onsubmit({preventDefault() {}});
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(ui.requests[1].body.tools_mode, "tools");
+  assert.equal(ui.requests[1].body.create_only, true);
 });
 
 function collectNodes(root) {
@@ -522,4 +543,215 @@ test("HTTP sandbox can copy through synchronous fallback", async () => {
   await ui.get("copy-install").onclick();
   assert.equal(copied, true);
   assert.equal(ui.get("copy-status").textContent, "已复制");
+});
+
+test("monitor is the default tab and tab navigation switches panels and active button state", async () => {
+  const ui = await boot();
+  assert.equal(ui.get("tab-monitor").hidden, false);
+  assert.equal(ui.get("tab-models").hidden, true);
+  assert.equal(ui.get("tab-setup").hidden, true);
+  assert.equal(ui.get("tab-btn-monitor").classList.contains("is-active"), true);
+
+  ui.get("goto-models").onclick();
+  assert.equal(ui.get("tab-monitor").hidden, true);
+  assert.equal(ui.get("tab-models").hidden, false);
+  assert.equal(ui.get("tab-btn-models").classList.contains("is-active"), true);
+
+  ui.get("tab-btn-setup").onclick();
+  assert.equal(ui.get("tab-models").hidden, true);
+  assert.equal(ui.get("tab-setup").hidden, false);
+  assert.equal(ui.get("tab-btn-setup").classList.contains("is-active"), true);
+});
+
+test("route-alert, drift-alert, routing-strip, and global effort label reflect live routing state", async () => {
+  const data = base();
+  data.global_effort = "high";
+  data.providers = [{
+    id: "acp-1", model: "gemini-test", thought_level: "default",
+    tools_mode: "inherit", enabled: true, is_default: false, config_drifted: true,
+  }];
+  data.routing = {
+    configured_primary_id: "acp-gone",
+    resolved_primary_id: "acp-1",
+    resolution_reason: "implicit_first_provider",
+    explicit_fallback_ids: ["fb-1"],
+    non_default_profile_overrides: 2,
+  };
+  const ui = await boot(data);
+  assert.equal(ui.get("route-alert").hidden, false);
+  assert.match(ui.get("route-alert").children[0].textContent, /acp-gone/);
+  assert.equal(ui.get("drift-alert").hidden, false);
+  assert.match(ui.get("routing-strip-meta").textContent, /备用 1 项/);
+  assert.match(ui.get("routing-strip-meta").textContent, /2 个独立 Profile 覆盖/);
+  assert.match(ui.get("global-policy-summary").textContent, /思考 高/);
+
+  const cardText = collectNodes(ui.get("configured")).map(n => n.textContent).filter(Boolean);
+  assert.ok(cardText.some(t => t.includes("跟随全局（高）")));
+  assert.ok(cardText.includes("需同步"));
+
+  // 点击顶部异常恢复按钮应将 acp-1 设为默认；待请求完成后点击漂移同步按钮触发批量修复
+  ui.get("route-alert").children[1].click();
+  await new Promise(resolve => setImmediate(resolve));
+  ui.get("drift-alert").children[1].click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.requests[0].endpoint, "setup/provider-default");
+  assert.deepEqual({...ui.requests[0].body}, {provider_id: "acp-1", confirm: true, csrf: "test-nonce"});
+  assert.equal(ui.requests[1].endpoint, "setup/provider-repair");
+  assert.deepEqual({...ui.requests[1].body}, {all: true, csrf: "test-nonce"});
+});
+
+test("add modal blocks duplicate config, protects fields from background polls, and caches catalog during busy probe", async () => {
+  const data = base();
+  data.report.models = [{id: "gemini-test", name: "Gemini Test"}, {id: "gemini-other", name: "Gemini Other"}];
+  data.efforts_by_model = {"gemini-test": ["low", "high"], "gemini-other": ["medium"]};
+  data.providers = [{
+    id: "acp-1", model: "gemini-test", thought_level: "default",
+    tools_mode: "chat", enabled: true, is_default: true, config_drifted: false,
+  }];
+  const ui = await boot(data);
+
+  // 打开添加弹窗时默认参数恰好与 acp-1 重复，提交应被禁用
+  ui.get("open-add-model").onclick();
+  assert.equal(ui.get("modal-form").hidden, false);
+  assert.equal(ui.get("form-dup-warn").hidden, false);
+  assert.equal(ui.get("apply").disabled, true);
+
+  // 修改参数并在弹窗开启期间模拟后台轮询写入其他状态，当前编辑项不应被覆盖
+  ui.get("model").value = "gemini-other";
+  ui.get("model").onchange();
+  ui.get("effort").value = "medium";
+  ui.get("effort").onchange();
+  ui.get("tools-mode").value = "tools";
+  ui.get("tools-mode").onchange();
+  assert.equal(ui.get("form-dup-warn").hidden, true);
+  assert.equal(ui.get("apply").disabled, false);
+
+  const busyPoll = base();
+  busyPoll.busy = true;
+  busyPoll.report = {status: "checking", stage: "model_catalog", models: []};
+  busyPoll.cached_models = data.report.models;
+  ui.api.render(busyPoll);
+  assert.equal(ui.get("model").value, "gemini-other");
+  assert.equal(ui.get("effort").value, "medium");
+  assert.equal(ui.get("tools-mode").value, "tools");
+});
+
+test("edit modal preserves provider_id, warns on model swap, and submits setup/provider-update", async () => {
+  const data = base();
+  data.report.models = [{id: "gemini-test", name: "Gemini Test"}, {id: "gemini-other", name: "Gemini Other"}];
+  data.efforts_by_model = {"gemini-test": ["low", "high"], "gemini-other": ["medium"]};
+  data.providers = [{
+    id: "acp-1", model: "gemini-test", thought_level: "low",
+    tools_mode: "tools", enabled: true, is_default: true, config_drifted: false,
+  }];
+  const ui = await boot(data);
+  const card = ui.get("configured").children[0];
+  const editBtn = collectNodes(card).find(n => n.tag === "button" && n.textContent === "编辑");
+  editBtn.click();
+
+  assert.equal(ui.get("modal-form").hidden, false);
+  assert.equal(ui.get("form-id-row").hidden, false);
+  assert.equal(ui.get("form-id-val").textContent, "acp-1");
+  assert.equal(ui.get("use-default-row").hidden, true);
+  assert.equal(ui.get("model").value, "gemini-test");
+  assert.equal(ui.get("effort").value, "low");
+  assert.equal(ui.get("tools-mode").value, "tools");
+  assert.equal(ui.get("form-model-warn").hidden, true);
+
+  ui.get("model").value = "gemini-other";
+  ui.get("model").onchange();
+  assert.equal(ui.get("form-model-warn").hidden, false);
+
+  ui.get("model-form").onsubmit({preventDefault() {}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.get("modal-form").hidden, true);
+  assert.equal(ui.requests[0].endpoint, "setup/provider-update");
+  assert.deepEqual({...ui.requests[0].body}, {
+    provider_id: "acp-1",
+    model: "gemini-other",
+    effort: "default",
+    tools_mode: "tools",
+    csrf: "test-nonce",
+  });
+});
+
+test("controlled offboarding fetches provider-impact and sends migrate_default_to with force_confirm", async () => {
+  const data = base();
+  data.providers = [
+    {id: "acp-1", model: "gemini-test", thought_level: "default", tools_mode: "chat", enabled: true, is_default: true, config_drifted: false},
+    {id: "acp-2", model: "gemini-flash", thought_level: "low", tools_mode: "chat", enabled: true, is_default: false, config_drifted: false},
+  ];
+  const ui = await boot(data);
+  ui.bridge.apiPost = async (endpoint, body) => {
+    ui.requests.push({endpoint, body});
+    if (endpoint === "setup/provider-impact") {
+      return {
+        impact: {
+          references: {primary: 1, fallback: 0, auxiliary: 1, observed_session_overrides: 2},
+          requires_migration: true,
+          replacement_candidates: [{id: "acp-2", model: "gemini-flash", thought_level: "low", is_acp: true}],
+        },
+      };
+    }
+    return data;
+  };
+
+  const firstCard = ui.get("configured").children[0];
+  const delBtn = collectNodes(firstCard).find(n => n.tag === "button" && n.textContent === "删除");
+  delBtn.click();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(ui.requests[0].endpoint, "setup/provider-impact");
+  assert.equal(ui.get("modal-impact").hidden, false);
+  assert.equal(ui.get("impact-mig-wrap").hidden, false);
+  assert.deepEqual(ui.get("impact-mig-select").children.map(o => o.value), ["acp-2", "__NONE__"]);
+
+  ui.get("impact-confirm").onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.get("modal-impact").hidden, true);
+  assert.equal(ui.requests[1].endpoint, "setup/provider-delete");
+  assert.deepEqual({...ui.requests[1].body}, {
+    provider_id: "acp-1",
+    confirm: true,
+    force_confirm: true,
+    migrate_default_to: "acp-2",
+    csrf: "test-nonce",
+  });
+
+  // 停用并选择置空全局默认时，migrate_default_to 应传空字符串
+  const currentCard = ui.get("configured").children[0];
+  const disableBtn = collectNodes(currentCard).find(n => n.tag === "button" && n.textContent === "停用");
+  disableBtn.click();
+  await new Promise(resolve => setImmediate(resolve));
+  ui.get("impact-mig-select").value = "__NONE__";
+  ui.get("impact-confirm").onclick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.requests[3].endpoint, "setup/provider-toggle");
+  assert.deepEqual({...ui.requests[3].body}, {
+    provider_id: "acp-1",
+    enabled: false,
+    confirm: true,
+    force_confirm: true,
+    migrate_default_to: "",
+    csrf: "test-nonce",
+  });
+});
+
+test("monitor cards display provider metadata badges when state.providers matches", async () => {
+  const data = base();
+  data.global_effort = "medium";
+  data.providers = [{
+    id: "agy-main", model: "gemini-test", thought_level: "default",
+    tools_mode: "chat", enabled: true, is_default: true, config_drifted: true,
+  }];
+  const ui = await boot(data);
+  ui.api.renderMonitor(monitorPayload({
+    context_used: null, context_window_size: null, observed_at: null,
+    source: "not_reported", scope: "latest_live_session", model: "gemini-test",
+  }));
+  const card = ui.get("monitor-instances").children[0];
+  const texts = collectNodes(card).map(n => n.textContent).filter(Boolean);
+  assert.ok(texts.includes("默认"));
+  assert.ok(texts.includes("跟随全局（中）"));
+  assert.ok(texts.includes("需同步"));
 });
