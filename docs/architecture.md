@@ -93,7 +93,7 @@ flowchart LR
 - 每实例内存保留最近 24 小时最多 100 轮，重启清空；持久 `agy.turn` 日志默认关闭（`cost_log_enabled=false`）。原始会话身份不暴露，监控对嵌套字段做白名单投影。
 - 文件桥只校验官方认证源的元数据，链接单个 `agy/antigravity-oauth-token`，不读取/复制内容。源缺失可尝试原生认证后端；不安全的现有文件为 `AUTH_BRIDGE`，不能靠忽略校验修复。
 - [login.py](../agy_provider/login.py) 把单行 code 交给官方 `agy acp --login` stdin；不解析完整 localhost 回调 URL。登录进程退出 0 后仍要通过 ACP/目录复检。URL/ticket 仅返回发起者，不落盘、不写业务日志。
-- [views/setup/app.js](../views/setup/app.js)（原生 HTML/CSS/JS） 使用宿主注入的 `window.AstrBotPluginView`：先 `ready()`，再调用相对 `setup/status` 等 endpoint；不访问父页面 DOM、Dashboard token；本地存储仅用于非敏感主题偏好。设置 POST 使用当前 nonce，后台动作须轮询终态；模型已保存但全局默认切换失败应显示部分成功。
+- [views/setup/app.js](../views/setup/app.js)（原生 HTML/CSS/JS） 使用宿主注入的 `window.AstrBotPluginView`：先 `ready()`，再调用相对 `setup/status` 等 endpoint；不访问父页面 DOM、Dashboard token；本地存储仅用于非敏感主题偏好。首页默认为「运行监控」，与「模型管理」（支持 `setup/apply` 新建、`setup/provider-update` 原地编辑保留 ID、`setup/provider-repair` 修复配置漂移、`setup/provider-impact` 预览影响并原子迁移全局默认后再停用/删除）及「环境与认证」分标签页协同。设置 POST 使用当前 nonce，后台动作须轮询终态；模型已保存但全局默认切换失败应显示部分成功。
 - `GET monitor/status` 只收集现有实例快照，不启动 Runtime/CLI；仅配置中的 Dashboard 管理员可读，匿名 401，API Key/其他身份 403，停用 503，响应 `Cache-Control: no-store`。聊天管理员与 Dashboard 身份不是同一鉴权入口。
 - 原生 DOM/bridge 测试覆盖交互与监控 schema v2；前端直接分发，无需构建，真实 iframe、主题、布局、剪贴板与 HTTP 鉴权需要另验。不要用静态页面预览替代宿主验收。
 - 宿主把视图放进 `sandbox="allow-scripts allow-forms allow-downloads"` 的 iframe，且多数部署是 `http://<ip>`（非安全上下文）：`navigator.clipboard` 常为 `undefined`、`window.open` 可能被拦截。复制必须按「Clipboard API → 手势内同步 `execCommand` → 选中文本」降级，且轮询渲染不得重写未变化的 `input.value`（会折叠用户选区）。以上是宿主约束，不是插件缺陷，改动视图时保持不变式。

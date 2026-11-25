@@ -284,6 +284,88 @@ h1 {
   color: var(--danger);
 }
 
+.alert-warn {
+  background: var(--paused-soft);
+  color: var(--paused);
+}
+
+.alert-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* AstrBot / Vuetify 下划线页签 */
+.v-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.v-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 140ms ease;
+}
+
+.v-tab:hover {
+  color: var(--text);
+}
+
+.v-tab.is-active {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.v-tab.is-active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--primary);
+}
+
+.routing-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: var(--radius-inner);
+  background: var(--surface-subtle);
+}
+
+.routing-strip-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.routing-strip-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 /* 卡片 */
 .card {
   display: flex;
@@ -964,6 +1046,11 @@ h2 {
   color: var(--danger);
 }
 
+.badge[data-state="primary"] {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
 .meta-line {
   display: flex;
   align-items: center;
@@ -1067,6 +1154,24 @@ input[type="checkbox"] {
 .btn-ghost:hover:enabled {
   background: var(--hover);
   color: var(--text);
+}
+
+.btn-warn-soft {
+  background: var(--paused-soft);
+  color: var(--paused);
+}
+
+.btn-warn-soft:hover:enabled {
+  opacity: 0.9;
+}
+
+.btn-danger-soft {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.btn-danger-soft:hover:enabled {
+  opacity: 0.9;
 }
 
 .btn-sm {
@@ -1209,6 +1314,73 @@ code {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.provider-title-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.provider-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.provider-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* 弹窗覆盖层 */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 460px;
+}
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.impact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-inner);
+  background: var(--surface-subtle);
+}
+
+.impact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
 }
 
 .provider strong {

@@ -1,8 +1,10 @@
 const $ = (id) => document.getElementById(id);
 const bridge = window.AstrBotPluginView;
 const SVG_NS = "http://www.w3.org/2000/svg";
-let state, pending = false, disposed = false, timer, copyTimer, revision = 0, cachedModels = [], modelSignature = "", effortSignature = "", providerSignature = "";
-let themeMode = "auto", nextManualTheme = "dark";
+let state, pending = false, disposed = false, timer, copyTimer, revision = 0;
+let cachedModels = [], cachedEffortsByModel = {}, modelSignature = "", effortSignature = "", providerSignature = "";
+let themeMode = "auto", nextManualTheme = "dark", activeTab = "monitor";
+let editingProviderId = null, formModalOpen = false, impactContext = null;
 let previousInstallError, monitorSignature, copyAttempt = 0, toastTimer, pollFailures = 0, pollPending = false, suspended = false, refreshEpoch = 0;
 const bannerErrors = {action: "", poll: ""};
 const buttonFeedback = new WeakMap(), listSignatures = new WeakMap();
@@ -30,7 +32,8 @@ const rebuildReasonLabels = {
   history_rewrite: "历史重写", history_host_trim: "历史裁剪", history_append_gap: "历史断层",
   unknown: "未知原因",
 };
-const toolsModeLabels = {chat: "纯聊天", inherit: "跟随全局", tools: "工具模式", invalid: "无效配置"};
+const effortLabels = {default: "CLI默认", low: "低", medium: "中", high: "高", invalid: "无效配置"};
+const toolsModeLabels = {chat: "纯聊天", inherit: "跟随总闸", tools: "工具模式", invalid: "无效配置"};
 const turnStatusLabels = {ok: "成功", error: "失败", cancelled: "取消", short_circuited: "预检/熔断拦截", unknown: "未知"};
 const transportLabels = {loopback_hmac: "本机认证连接", unix_socket: "Unix Socket", unsupported: "当前平台不支持"};
 const supervisionLabels = {windows_job: "Windows Job Object", windows_taskkill_fallback: "taskkill 回退", posix_process_group: "独立进程组"};
@@ -45,6 +48,27 @@ const faultLabels = {
 function formatFaultBrief(code) {
   const label = faultLabels[code];
   return label ? `${label} (${code})` : code;
+}
+
+function globalEffortText(globalEffort = state?.global_effort || "default") {
+  return globalEffort === "default"
+    ? "跟随全局（CLI默认）"
+    : `跟随全局（${effortLabels[globalEffort] || globalEffort}）`;
+}
+
+function formatEffortBadge(effort, globalEffort) {
+  if (effort === "default") return globalEffortText(globalEffort);
+  return `思考：${effortLabels[effort] || effort}`;
+}
+
+function switchTab(next) {
+  activeTab = next;
+  for (const name of ["monitor", "models", "setup"]) {
+    const panel = $(`tab-${name}`);
+    const btn = $(`tab-btn-${name}`);
+    if (panel) panel.hidden = name !== next;
+    if (btn) btn.classList.toggle("is-active", name === next);
+  }
 }
 
 function applyTheme() {
@@ -67,9 +91,10 @@ function cycleTheme() {
 }
 
 function badge(id, text, kind = "") {
-  const el = $(id);
-  el.textContent = text;
-  el.dataset.state = kind;
+  const node = $(id);
+  if (!node) return;
+  node.textContent = text;
+  node.dataset.state = kind;
 }
 
 function setConnection(text, kind = "busy") {
@@ -98,16 +123,15 @@ function showCopyFeedback(button, copied) {
   const label = previous?.label ?? button.textContent;
   clearTimeout(previous?.timer);
   button.textContent = copied ? "已复制 ✓" : "请手动复制";
-  const timer = setTimeout(() => {
+  const t = setTimeout(() => {
     button.textContent = label;
     buttonFeedback.delete(button);
   }, 2000);
-  buttonFeedback.set(button, {label, timer});
+  buttonFeedback.set(button, {label, timer: t});
   toast(copied ? "已复制" : "已选中，请按 Ctrl+C / ⌘C 复制", copied ? "ok" : "warn");
 }
 
-async function copy(input, button) {
-  const text = input.value;
+async function copyText(text, button, fallbackInput = null) {
   if (!text) return;
   const attempt = ++copyAttempt;
   let clipboardWrite;
@@ -136,12 +160,17 @@ async function copy(input, button) {
   }
 
   if (!copied && clipboardWrite) copied = await clipboardWrite;
-  if (disposed || attempt !== copyAttempt || input.value !== text) return;
-  if (!copied) {
-    input.focus();
-    input.select();
+  if (disposed || attempt !== copyAttempt) return;
+  if (fallbackInput && fallbackInput.value !== text) return;
+  if (!copied && fallbackInput) {
+    fallbackInput.focus();
+    fallbackInput.select();
   }
   showCopyFeedback(button, copied);
+}
+
+async function copy(input, button) {
+  return copyText(input.value, button, input);
 }
 
 function openAuthorization() {
@@ -537,7 +566,7 @@ function renderDiagnostics(row, recent, pool, idKey) {
     const rep = state.report;
     pKv.append(
       kvItem("CLI 状态与版本", `${rep.status || "未知"} (${stages[rep.stage] || rep.stage || "未知"}) · ${rep.cli_version || "未探测"}`),
-      kvItem("进程托管 / 工具桥", `${supervisionLabels[rep.process_supervision] || rep.process_supervision || "未知"} · ${transportLabels[rep.tool_bridge_transport] || rep.tool_bridge_transport || "未知"}`),
+      kvItem("进程托管 / 工具桥", `${supervisionLabels[rep.process_supervision] || rep.process_supervision || "未知"} · ${transportLabels[rep.tool_bridge_transport] || "未知"}`),
     );
   }
   providerGroup.append(pKv);
@@ -594,10 +623,87 @@ function renderRouting(routing) {
     ["显式备用模型", Array.isArray(routing.explicit_fallback_ids) ? routing.explicit_fallback_ids.join("、") || "无" : "未报告"],
   ] : [["路由状态", "未报告"]];
   const sig = JSON.stringify(fields);
-  if (listSignatures.get(panel) === sig) return;
-  panel.replaceChildren(...fields.map(([label, value]) => kvItem(label, value)));
-  listSignatures.set(panel, sig);
+  if (listSignatures.get(panel) !== sig) {
+    panel.replaceChildren(...fields.map(([label, value]) => kvItem(label, value)));
+    listSignatures.set(panel, sig);
+  }
+
+  // 更新监控顶部单行路由摘要
+  const providers = state?.providers || [];
+  const primaryId = routing?.configured_primary_id;
+  const matched = providers.find(p => p.id === primaryId);
+  const stripText = $("routing-strip-text");
+  const stripBadge = $("routing-strip-badge");
+  const stripMeta = $("routing-strip-meta");
+  if (!routing || typeof routing !== "object" || routing.resolution_reason === "unknown") {
+    stripText.textContent = providers.length ? "未报告" : "尚未添加模型";
+    badge("routing-strip-badge", "未知", "");
+    stripMeta.textContent = "";
+    return;
+  }
+  if (routing.resolution_reason === "configured_primary") {
+    stripText.textContent = matched
+      ? `${matched.model} · ${formatEffortBadge(matched.thought_level || "default", state?.global_effort)} · ${toolsModeLabels[matched.tools_mode] || "跟随总闸"}`
+      : (routing.resolved_primary_id || "未知");
+    badge("routing-strip-badge", "生效中", "ready");
+  } else if (routing.resolution_reason === "implicit_first_provider") {
+    stripText.textContent = primaryId ? `已失效 (${primaryId})` : "未设置";
+    badge("routing-strip-badge", `回退：${routing.resolved_primary_id || "未知"}`, "error");
+  } else if (routing.resolution_reason === "non_local_runner") {
+    stripText.textContent = "非本地 runner";
+    badge("routing-strip-badge", "非本地", "warn");
+  } else {
+    stripText.textContent = "未设置默认模型";
+    badge("routing-strip-badge", "未命中", "error");
+  }
+  const fbCount = Array.isArray(routing.explicit_fallback_ids) ? routing.explicit_fallback_ids.length : 0;
+  const profCount = Number(routing.non_default_profile_overrides || 0);
+  const extras = [];
+  if (fbCount) extras.push(`备用 ${fbCount} 项`);
+  if (profCount) extras.push(`${profCount} 个独立 Profile 覆盖`);
+  stripMeta.textContent = extras.join(" · ");
 }
+
+function renderAlerts(data) {
+  const routing = data.routing ?? monitorSnapshot?.routing;
+  const providers = data.providers || [];
+  const routeAlert = $("route-alert");
+  const enabledAcp = providers.find(p => p.enabled);
+  const busy = pending || data.busy || activeLogin(data.login);
+
+  if (routing && (routing.resolution_reason === "implicit_first_provider" || (routing.resolution_reason === "missing_primary" && enabledAcp))) {
+    const msg = routing.resolution_reason === "implicit_first_provider"
+      ? `全局默认配置（${routing.configured_primary_id || "未设置"}）未命中，当前隐式路由至 ${routing.resolved_primary_id || "未知"}。`
+      : "当前未设置可用全局默认模型。";
+    const span = el("span", "", msg);
+    const btn = el("button", "btn btn-sm", enabledAcp ? `切换为 ${enabledAcp.model}` : "前往设置");
+    btn.type = "button";
+    btn.disabled = busy;
+    btn.addEventListener("click", () => {
+      if (enabledAcp) action("provider-default", {provider_id: enabledAcp.id, confirm: true});
+      else switchTab("models");
+    });
+    routeAlert.replaceChildren(span, btn);
+    routeAlert.hidden = false;
+  } else {
+    routeAlert.hidden = true;
+  }
+
+  const drifted = providers.filter(p => p.config_drifted);
+  const driftAlert = $("drift-alert");
+  if (drifted.length) {
+    const span = el("span", "", `${drifted.length} 个模型配置与当前全局总闸或 ACP 规范不一致。`);
+    const btn = el("button", "btn btn-sm", "一键同步");
+    btn.type = "button";
+    btn.disabled = busy;
+    btn.addEventListener("click", () => action("provider-repair", {all: true}));
+    driftAlert.replaceChildren(span, btn);
+    driftAlert.hidden = false;
+  } else {
+    driftAlert.hidden = true;
+  }
+}
+
 function renderFailureEvents(data) {
   const panel = $("persistent-failures");
   const status = $("failure-storage");
@@ -616,13 +722,15 @@ function renderFailureEvents(data) {
   }));
   if (!rows.length) panel.append(el("p", "small", "暂无失败记录"));
 }
+
 function renderMonitor(data) {
   if (![1, 2].includes(data.schema_version) || !Array.isArray(data.instances)) throw new Error("monitor schema");
-  const signature = JSON.stringify([data.instances, state?.report, data.routing, data.failure_events, data.failure_retention]);
+  const providerMeta = state?.providers || [];
+  const signature = JSON.stringify([data.instances, state?.report, data.routing, data.failure_events, data.failure_retention, providerMeta]);
   if (monitorSignature === signature) {
     $("monitor").dataset.stale = "false";
     badge("monitor-badge", "正常", data.instances.length ? "ready" : "");
-    $("monitor-message").textContent = data.instances.length ? "" : "尚未配置 AGY 实例，请在下方完成模型配置。";
+    $("monitor-message").textContent = data.instances.length ? "" : "尚未添加模型，请前往「模型管理」添加。";
     $("monitor-updated").textContent = `更新于 ${monitorShortTime(data.sampled_at)}`;
     monitorSnapshot = data;
     return;
@@ -639,11 +747,25 @@ function renderMonitor(data) {
     const summary = row.summary;
     const context = row.latest_context || {};
     const faults = recent.filter(turn => turn.error_code || turn.status === "error");
+    const extraMeta = providerMeta.find(p => p.id === row.provider_id);
 
     const head = el("div", "monitor-instance-head");
     const idGroup = el("div", "monitor-id-group");
     idGroup.append(el("h3", "", row.provider_id), el("p", "monitor-model", row.model || "未选择模型"));
     const badges = el("div", "monitor-badges");
+    if (extraMeta?.is_default) {
+      const defBadge = el("span", "badge", "默认");
+      defBadge.dataset.state = "primary";
+      badges.append(defBadge);
+    }
+    if (extraMeta?.thought_level) {
+      badges.append(el("span", "badge", formatEffortBadge(extraMeta.thought_level, state?.global_effort)));
+    }
+    if (extraMeta?.config_drifted) {
+      const driftBadge = el("span", "badge", "需同步");
+      driftBadge.dataset.state = "warn";
+      badges.append(driftBadge);
+    }
     const enabledBadge = el("span", "badge", row.enabled ? "已启用" : "已停用");
     if (row.enabled && row.runtime_state === "active") enabledBadge.dataset.state = "ready";
     const modeLabel = row.effective_mode === "tools" ? "工具模式" : row.effective_mode === "chat" ? "纯聊天" : "模式未知";
@@ -724,7 +846,7 @@ function renderMonitor(data) {
   $("monitor-instances").replaceChildren(...cards);
   $("monitor").dataset.stale = "false";
   badge("monitor-badge", "正常", cards.length ? "ready" : "");
-  $("monitor-message").textContent = cards.length ? "" : "尚未配置 AGY 实例，请在下方完成模型配置。";
+  $("monitor-message").textContent = cards.length ? "" : "尚未添加模型，请前往「模型管理」添加。";
   $("monitor-updated").textContent = `更新于 ${monitorShortTime(data.sampled_at)}`;
   monitorSnapshot = data;
 }
@@ -744,6 +866,7 @@ function renderSetupProgress(data, passed) {
     return item;
   }));
 }
+
 async function refreshMonitor() {
   clearTimeout(monitorTimer);
   if (disposed || suspended || document.hidden || monitorPending || !monitorReady) return;
@@ -781,16 +904,160 @@ async function refreshMonitor() {
   }
 }
 
+function syncEffortOptions(selectedModel, preferredValue) {
+  const efforts = cachedEffortsByModel[selectedModel] || state?.report?.efforts || ["low", "medium", "high"];
+  const validEfforts = efforts.filter(e => ["low", "medium", "high"].includes(e));
+  const effortKey = JSON.stringify([selectedModel, validEfforts, state?.global_effort]);
+  const allowed = ["default", ...validEfforts];
+  const previous = preferredValue ?? $("effort").value;
+  if (effortSignature !== effortKey) {
+    $("effort").replaceChildren(
+      new Option(globalEffortText(state?.global_effort), "default"),
+      ...validEfforts.map(e => new Option(effortLabels[e] || e, e)),
+    );
+    effortSignature = effortKey;
+  }
+  const target = allowed.includes(previous) ? previous : "default";
+  if ($("effort").value !== target) $("effort").value = target;
+}
+
+function syncFormValidation() {
+  const m = $("model").value;
+  const e = $("effort").value;
+  const mode = $("tools-mode").value;
+  const providers = state?.providers || [];
+  const editingRow = editingProviderId ? providers.find(p => p.id === editingProviderId) : null;
+
+  $("form-model-warn").hidden = !(editingRow && editingRow.model !== m);
+  const dup = providers.some(p =>
+    p.id !== editingProviderId
+    && p.model === m
+    && (p.thought_level || "default") === e
+    && (p.tools_mode || "inherit") === mode
+  );
+  $("form-dup-warn").hidden = !dup;
+
+  const busy = pending || Boolean(state?.busy) || activeLogin(state?.login);
+  const passed = state?.report?.status === "passed";
+  const allowSubmit = !busy && Boolean(m) && !dup && (Boolean(editingProviderId) || passed);
+  $("apply").disabled = !allowSubmit;
+}
+
+function openAddModal() {
+  if (!state) return;
+  editingProviderId = null;
+  formModalOpen = true;
+  $("modal-form-title").textContent = "添加模型";
+  $("form-id-row").hidden = true;
+  $("use-default-row").hidden = false;
+  $("use-default").checked = false;
+  $("tools-mode").value = "chat";
+  syncEffortOptions($("model").value, "default");
+  syncFormValidation();
+  $("modal-form").hidden = false;
+}
+
+function openEditModal(providerId) {
+  if (!state) return;
+  const row = (state.providers || []).find(p => p.id === providerId);
+  if (!row) return;
+  editingProviderId = providerId;
+  formModalOpen = true;
+  $("modal-form-title").textContent = "编辑模型";
+  $("form-id-row").hidden = false;
+  $("form-id-val").textContent = providerId;
+  $("use-default-row").hidden = true;
+
+  if (cachedModels.some(m => m.id === row.model)) {
+    $("model").value = row.model;
+  }
+  syncEffortOptions($("model").value, ["default", "low", "medium", "high"].includes(row.thought_level) ? row.thought_level : "default");
+  $("tools-mode").value = ["chat", "inherit", "tools"].includes(row.tools_mode) ? row.tools_mode : "inherit";
+  syncFormValidation();
+  $("modal-form").hidden = false;
+}
+
+function closeFormModal() {
+  formModalOpen = false;
+  $("modal-form").hidden = true;
+  editingProviderId = null;
+}
+
+function closeImpactModal() {
+  $("modal-impact").hidden = true;
+  impactContext = null;
+}
+
+async function openImpactModal(providerId, op) {
+  if (!state || pending) return;
+  const row = (state.providers || []).find(p => p.id === providerId);
+  if (!row) return;
+  try {
+    const resp = await bridge.apiPost("setup/provider-impact", {csrf: state.csrf, provider_id: providerId});
+    const impact = resp?.impact;
+    if (!impact || disposed) return;
+    impactContext = {providerId, op, impact};
+
+    $("impact-title").textContent = op === "delete" ? `删除 ${row.model}` : `停用 ${row.model}`;
+    const refs = impact.references || {};
+    $("impact-kv").replaceChildren(...[
+      ["全局默认引用", impact.requires_migration ? "是" : "否"],
+      ["Fallback 引用", `${refs.fallback || 0} 处`],
+      ["辅助配置引用", `${refs.auxiliary || 0} 处`],
+      ["已观测会话绑定", `${refs.observed_session_overrides || 0} 个`],
+    ].map(([k, v]) => {
+      const line = el("div", "impact-row");
+      line.append(el("span", "small", k), el("strong", "", v));
+      return line;
+    }));
+
+    const migWrap = $("impact-mig-wrap");
+    const migSelect = $("impact-mig-select");
+    if (impact.requires_migration) {
+      const candidates = Array.isArray(impact.replacement_candidates) ? impact.replacement_candidates : [];
+      migSelect.replaceChildren(
+        ...candidates.map(c => new Option(
+          c.is_acp ? `${c.model} (${effortLabels[c.thought_level] || c.thought_level} · ${c.id})` : `${c.model} (${c.id})`,
+          c.id,
+        )),
+        new Option("置空默认（可能触发隐式回退）", "__NONE__"),
+      );
+      migWrap.hidden = false;
+    } else {
+      migSelect.replaceChildren();
+      migWrap.hidden = true;
+    }
+
+    const btn = $("impact-confirm");
+    btn.className = `btn ${op === "delete" ? "btn-danger-soft" : "btn-warn-soft"}`;
+    btn.textContent = op === "delete" ? "确认删除" : "确认停用";
+    $("modal-impact").hidden = false;
+  } catch (error) {
+    showError(error?.message || "读取影响范围失败。");
+  }
+}
+
 function render(data) {
-  state = data;
+  const prevBusy = Boolean(state?.busy);
   data = {...data, report: data.report || {}, login: data.login || {}, environment: data.environment || {}, providers: Array.isArray(data.providers) ? data.providers : []};
   state = data;
   const r = data.report, login = data.login;
   renderRouting(data.routing ?? monitorSnapshot?.routing);
+  renderAlerts(data);
   const busy = pending || data.busy || activeLogin(login);
   const passed = r.status === "passed";
-  if (Array.isArray(r.models)) cachedModels = r.models;
-  else if (!busy) cachedModels = [];
+
+  if (Array.isArray(r.models) && r.models.length) cachedModels = r.models;
+  else if (Array.isArray(data.cached_models) && data.cached_models.length) cachedModels = data.cached_models;
+  else if (!busy && r.status === "blocked" && ["NOT_INSTALLED", "COMMAND_NOT_FOUND", "AUTH", "NO_MODELS"].includes(r.error_code)) {
+    cachedModels = [];
+  }
+  if (data.efforts_by_model && typeof data.efforts_by_model === "object") {
+    cachedEffortsByModel = {...cachedEffortsByModel, ...data.efforts_by_model};
+  }
+  if (r.selected_model && Array.isArray(r.efforts)) {
+    cachedEffortsByModel[r.selected_model] = r.efforts;
+  }
   const models = cachedModels;
 
   renderSetupProgress(data, passed);
@@ -801,7 +1068,6 @@ function render(data) {
   setInputValue("install-url", data.environment.install_url);
   setInputValue("install-command", data.environment.install_command);
 
-  // 默认仅展示 CLI 版本、可用模型数量，以及失败时的退出码与阶段
   $("facts").replaceChildren(...[
     r.cli_version ? `CLI ${r.cli_version}` : null,
     r.model_count != null ? `${r.model_count} 个可用模型` : null,
@@ -809,7 +1075,8 @@ function render(data) {
     r.error_code && stages[r.stage] ? `失败阶段：${stages[r.stage]}` : null,
   ].filter(Boolean).map(text => el("span", "fact", text)));
 
-  // 高级诊断明细移入 env-diag-list
+  $("global-policy-summary").textContent = `插件全局策略：思考 ${effortLabels[data.global_effort] || data.global_effort} · 工具 ${data.global_enable_tools ? "开启" : "关闭"} · 识图 ${data.global_enable_images ? "开启" : "关闭"}`;
+
   const caps = r.advertised_capabilities;
   const capSummary = caps
     ? `MCP(http=${Boolean(caps.mcpCapabilities?.http)}, sse=${Boolean(caps.mcpCapabilities?.sse)}) · 模态(img=${Boolean(caps.promptCapabilities?.image)}, audio=${Boolean(caps.promptCapabilities?.audio)})`
@@ -852,8 +1119,10 @@ function render(data) {
   if (login.state !== "waiting") $("auth-code").value = "";
   $("submit-code").disabled = pending || login.state !== "waiting";
 
+  // 弹窗打开期间不覆盖用户正在编辑的表单选项
+  const modalOpen = formModalOpen;
   const signature = JSON.stringify(models);
-  if (modelSignature !== signature) {
+  if (modelSignature !== signature && !modalOpen) {
     const previous = $("model").value;
     $("model").replaceChildren(new Option(models.length ? "请选择模型" : "先完成环境检测", ""), ...models.map(m => new Option(m.name, m.id)));
     const preferred = [previous, r.selected_model, data.providers[0]?.model].find(id => models.some(m => m.id === id));
@@ -861,61 +1130,116 @@ function render(data) {
     modelSignature = signature;
   }
   const selected = $("model").value;
-  const efforts = r.selected_model === selected ? r.efforts || [] : [];
-  const effortKey = JSON.stringify([selected, efforts, data.global_effort]);
-  if (effortSignature !== effortKey && (!busy || r.selected_model === selected)) {
-    const previous = $("effort").value;
-    $("effort").replaceChildren(new Option(`跟随全局（${data.global_effort}）`, "default"), ...efforts.map(e => new Option({low: "低", medium: "中", high: "高"}[e], e)));
-    if (["default", ...efforts].includes(previous)) $("effort").value = previous;
-    effortSignature = effortKey;
+  if (!modalOpen) {
+    syncEffortOptions(selected);
   }
   $("model").disabled = busy || !models.length;
-  $("effort").disabled = busy || !passed || !selected;
+  $("effort").disabled = busy || !selected;
   if (!$("tools-mode").value) $("tools-mode").value = "chat";
-  $("tools-mode").disabled = busy || !passed || !selected;
-  $("apply").disabled = busy || !passed || !selected;
+  $("tools-mode").disabled = busy || !selected;
   $("use-default").disabled = busy;
-  badge("model-badge", models.length ? `${models.length} 个模型` : "等待登录", passed ? "ready" : "");
+  $("refresh-catalog").disabled = busy;
+  $("open-add-model").disabled = busy || !passed || !models.length;
+  syncFormValidation();
 
+  badge("model-badge", models.length ? `${models.length} 个可用` : "等待登录", passed ? "ready" : "");
   const configured = data.providers;
-  badge("finish-badge", data.result ? "已保存" : configured.length ? "已配置" : "等待配置", configured.length ? "ready" : "");
+  badge("finish-badge", data.result?.applied || data.result?.provider_id ? "已保存" : configured.length ? `${configured.length} 项` : "等待配置", configured.length ? "ready" : "");
   $("finish-hint").textContent = data.result?.default_selected
     ? "已同步设为全局默认模型。"
     : data.result?.provider_id && data.action_error ? "实例已保存；全局默认切换未确认，请核对路由。"
-    : configured.length ? "" : "保存模型后将在此生成会话切换命令。";
+    : data.result?.model_changed ? "已更新底层模型，将在下轮对话重建会话。"
+    : "";
 
-  const providerKey = JSON.stringify(configured);
+  const providerKey = JSON.stringify([configured, data.global_effort, busy]);
   if (providerSignature !== providerKey) {
-    $("configured").replaceChildren(...configured.map(row => {
-      const wrapper = el("div", "provider");
-      const pHead = el("div", "provider-head");
-      const title = el("strong", "", row.model);
-      const meta = el("span", "badge", `${toolsModeLabels[row.tools_mode] || "跟随全局"} · ${row.enabled ? "已启用" : "已停用"}`);
-      if (row.enabled) meta.dataset.state = "ready";
-      pHead.append(title, meta);
+    if (!configured.length) {
+      $("configured").replaceChildren(el("p", "small", passed ? "尚未添加模型，点击右上角「添加模型」。" : "请先在「环境与认证」完成登录。"));
+    } else {
+      $("configured").replaceChildren(...configured.map(row => {
+        const wrapper = el("div", "provider");
+        const pHead = el("div", "provider-head");
+        const titleGroup = el("div", "provider-title-group");
+        titleGroup.append(el("strong", "", row.model || row.id));
+        if (row.is_default) {
+          const defBadge = el("span", "badge", "默认");
+          defBadge.dataset.state = "primary";
+          titleGroup.append(defBadge);
+        }
+        const statusBadge = el("span", "badge", row.enabled ? "已启用" : "已停用");
+        if (row.enabled) statusBadge.dataset.state = "ready";
+        titleGroup.append(statusBadge);
+        if (row.config_drifted) {
+          const driftBadge = el("span", "badge", "需同步");
+          driftBadge.dataset.state = "warn";
+          titleGroup.append(driftBadge);
+        }
 
-      const line = el("div", "copy-row");
-      const input = document.createElement("input");
-      input.readOnly = true;
-      input.value = `/agy use ${row.id}`;
-      input.setAttribute("aria-label", "切换模型命令");
-      const button = el("button", "btn btn-sm", "复制命令");
-      button.type = "button";
-      button.addEventListener("click", () => copy(input, button));
-      line.append(input, button);
-      wrapper.append(pHead, line);
-      return wrapper;
-    }));
+        const actions = el("div", "provider-actions");
+        if (row.config_drifted) {
+          const repairBtn = el("button", "btn btn-warn-soft btn-sm", "修复");
+          repairBtn.type = "button";
+          repairBtn.disabled = busy;
+          repairBtn.addEventListener("click", () => action("provider-repair", {provider_id: row.id}));
+          actions.append(repairBtn);
+        }
+        if (!row.is_default) {
+          const defBtn = el("button", "btn btn-sm", "设为默认");
+          defBtn.type = "button";
+          defBtn.disabled = busy || !row.enabled;
+          defBtn.addEventListener("click", () => action("provider-default", {provider_id: row.id, confirm: true}));
+          actions.append(defBtn);
+        }
+        const editBtn = el("button", "btn btn-ghost btn-sm", "编辑");
+        editBtn.type = "button";
+        editBtn.disabled = busy;
+        editBtn.addEventListener("click", () => openEditModal(row.id));
+        actions.append(editBtn);
+
+        const toggleBtn = el("button", "btn btn-ghost btn-sm", row.enabled ? "停用" : "启用");
+        toggleBtn.type = "button";
+        toggleBtn.disabled = busy;
+        toggleBtn.addEventListener("click", () => {
+          if (row.enabled) openImpactModal(row.id, "disable");
+          else action("provider-toggle", {provider_id: row.id, enabled: true, confirm: true});
+        });
+        actions.append(toggleBtn);
+
+        const delBtn = el("button", "btn btn-danger-soft btn-sm", "删除");
+        delBtn.type = "button";
+        delBtn.disabled = busy;
+        delBtn.addEventListener("click", () => openImpactModal(row.id, "delete"));
+        actions.append(delBtn);
+
+        pHead.append(titleGroup, actions);
+
+        const meta = el("div", "provider-meta");
+        const metaLeft = el("span", "");
+        metaLeft.append(
+          `${formatEffortBadge(row.thought_level || "default", data.global_effort)} · ${toolsModeLabels[row.tools_mode] || "跟随总闸"} · `,
+          el("code", "", row.id),
+        );
+        const copyBtn = el("button", "btn btn-ghost btn-sm", "复制 /agy use");
+        copyBtn.type = "button";
+        copyBtn.addEventListener("click", () => copyText(`/agy use ${row.id}`, copyBtn));
+        meta.append(metaLeft, copyBtn);
+
+        wrapper.append(pHead, meta);
+        return wrapper;
+      }));
+    }
     providerSignature = providerKey;
   }
+
   if (data.action_error) showError(`${data.action_error}：${data.action_hint}`);
   const nextDiagSig = JSON.stringify([r.status, r.stage, r.cli_version, r.process_supervision, r.tool_bridge_transport]);
-  if (monitorSnapshot && nextDiagSig !== reportDiagSignature) {
+  if (monitorSnapshot && (nextDiagSig !== reportDiagSignature || (prevBusy && !data.busy))) {
     reportDiagSignature = nextDiagSig;
     renderMonitor(monitorSnapshot);
   } else {
     reportDiagSignature = nextDiagSig;
   }
+  if (prevBusy && !data.busy && monitorReady) refreshMonitor();
 }
 
 async function action(name, body = {}) {
@@ -926,6 +1250,7 @@ async function action(name, body = {}) {
     const data = await bridge.apiPost(`setup/${name}`, {...body, csrf: state.csrf});
     if (disposed) return;
     pending = false; render(data);
+    if (!data.busy && monitorReady) refreshMonitor();
   } catch (error) {
     if (disposed) return;
     pending = false; render(state); showError(error?.message || "请求失败，请刷新页面。");
@@ -933,8 +1258,18 @@ async function action(name, body = {}) {
 }
 
 $("theme-toggle").onclick = cycleTheme;
+$("tab-btn-monitor").onclick = () => switchTab("monitor");
+$("tab-btn-models").onclick = () => switchTab("models");
+$("tab-btn-setup").onclick = () => switchTab("setup");
+$("goto-models").onclick = () => switchTab("models");
 $("monitor-refresh").onclick = refreshMonitor;
 $("check").onclick = () => action("check");
+$("refresh-catalog").onclick = () => action("check");
+$("open-add-model").onclick = openAddModal;
+$("modal-close").onclick = closeFormModal;
+$("modal-cancel").onclick = closeFormModal;
+$("impact-close").onclick = closeImpactModal;
+$("impact-cancel").onclick = closeImpactModal;
 $("login").onclick = () => action("login");
 $("cancel-login").onclick = () => action("login-cancel", {ticket: state.login.ticket});
 $("open-auth").onclick = openAuthorization;
@@ -947,18 +1282,39 @@ $("code-form").onsubmit = async event => {
   await action("login-code", {ticket: state.login.ticket, code});
 };
 $("model").onchange = () => {
-  $("effort").value = "default";
-  if ($("model").value) action("check", {model: $("model").value});
-  else render(state);
+  syncEffortOptions($("model").value, "default");
+  syncFormValidation();
 };
+$("effort").onchange = syncFormValidation;
+$("tools-mode").onchange = syncFormValidation;
 $("model-form").onsubmit = event => {
   event.preventDefault();
-  action("apply", {
+  const payload = {
     model: $("model").value,
     effort: $("effort").value,
     tools_mode: $("tools-mode").value || "chat",
-    use_default: $("use-default").checked,
-  });
+  };
+  if (editingProviderId) {
+    const targetId = editingProviderId;
+    closeFormModal();
+    action("provider-update", {provider_id: targetId, ...payload});
+  } else {
+    const useDefault = $("use-default").checked;
+    closeFormModal();
+    action("apply", {...payload, use_default: useDefault, create_only: true});
+  }
+};
+$("impact-confirm").onclick = () => {
+  if (!impactContext) return;
+  const {providerId, op, impact} = impactContext;
+  const payload = {provider_id: providerId, confirm: true, force_confirm: true};
+  if (impact.requires_migration) {
+    const chosen = $("impact-mig-select").value;
+    payload.migrate_default_to = chosen === "__NONE__" ? "" : chosen;
+  }
+  closeImpactModal();
+  if (op === "delete") action("provider-delete", payload);
+  else action("provider-toggle", {...payload, enabled: false});
 };
 
 async function poll() {
@@ -1037,6 +1393,7 @@ if (!bridge) {
     if (!disposed) {
       monitorReady = true;
       applyTheme();
+      switchTab("monitor");
       refreshMonitor();
       await poll();
     }

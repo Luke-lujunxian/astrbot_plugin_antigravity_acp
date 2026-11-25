@@ -14,8 +14,20 @@ from .errors import AgyError
 from .login import LoginFlow
 from .paths import plugin_data_root
 from .probe import probe
-from .routing import (OverrideObservations, dashboard_admin, enable_provider,
-                      provider_impact, routing_snapshot, select_default)
+from .routing import (
+    OverrideObservations,
+    compute_acp_modalities,
+    dashboard_admin,
+    delete_acp_provider,
+    disable_provider,
+    enable_provider,
+    inspect_acp_provider,
+    provider_impact,
+    repair_acp_providers,
+    routing_snapshot,
+    select_default,
+    update_acp_provider,
+)
 
 PLUGIN_NAME = "astrbot_plugin_antigravity_acp"
 HINTS = {
@@ -79,6 +91,15 @@ def environment(settings=None):
     }
 
 
+def _provider_defaults():
+    """读取适配器默认模板与类型标识；离线测试无宿主 provider 模块时回退到本地常量。"""
+    try:
+        from .provider import DEFAULT_CONFIG, PROVIDER_TYPE
+    except ImportError:
+        from .routing import DEFAULT_CONFIG, PROVIDER_TYPE
+    return DEFAULT_CONFIG, PROVIDER_TYPE
+
+
 async def ensure_provider_source(manager):
     """Persist the source relationship required by AstrBot 4.29's model page.
 
@@ -88,7 +109,7 @@ async def ensure_provider_source(manager):
     Old hosts lacking resource_lock or provider_sources structure skip binding
     with a warning so wizard saves can proceed.
     """
-    from .provider import PROVIDER_TYPE
+    _, PROVIDER_TYPE = _provider_defaults()
 
     lock = getattr(manager, "resource_lock", None)
     acm = getattr(manager, "acm", None)
@@ -185,6 +206,8 @@ class Onboarding:
         self.routes = []
         self.overrides = OverrideObservations()
         self.override_hook = self.overrides.changed
+        self.cached_models = []
+        self.efforts_by_model = {}
 
     @property
     def busy(self):
@@ -196,32 +219,50 @@ class Onboarding:
         if self.busy or self.login.busy:
             raise AgyError("BUSY", "检测、登录或保存正在进行，请等待完成。")
 
+    def _known_models(self):
+        models = self.report.get("models")
+        if isinstance(models, list) and models:
+            return models
+        return self.cached_models
+
     def providers(self):
-        from .provider import PROVIDER_TYPE
+        _, PROVIDER_TYPE = _provider_defaults()
 
         manager = self.context.provider_manager
+        route = routing_snapshot(manager)
+        acm = getattr(manager, "acm", None)
+        default_conf = getattr(acm, "default_conf", None)
+        sources = (
+            default_conf.get("provider_sources")
+            if isinstance(default_conf, dict)
+            else getattr(manager, "provider_sources_config", None)
+        )
+        source_ids = (
+            {row.get("id") for row in sources if isinstance(row, dict) and row.get("id")}
+            if isinstance(sources, list) and sources
+            else None
+        )
         rows = []
         for config in list(manager.providers_config):
             merged = manager.get_merged_provider_config(config)
             if merged.get("type") == PROVIDER_TYPE:
-                tools_mode = (merged.get("custom_extra_body") or {}).get(
-                    "agy_tools_mode", "inherit"
+                rows.append(
+                    inspect_acp_provider(
+                        manager,
+                        config,
+                        self.settings,
+                        route=route,
+                        source_ids=source_ids,
+                    )
                 )
-                rows.append({
-                    "id": config.get("id"),
-                    "model": merged.get("model") or (merged.get("model_config") or {}).get("model", ""),
-                    "enabled": bool(config.get("enable")),
-                    "tools_mode": tools_mode,
-                    "effective_tools": bool(
-                        self.settings.enable_tools and tools_mode != "chat"
-                    ),
-                })
         return rows
 
     def snapshot(self, owner=""):
         return {
             "csrf": self.csrf, "busy": self.busy, "operation": self.operation,
             "report": deepcopy(self.report), "hint": next_step(self.report),
+            "cached_models": deepcopy(self._known_models()),
+            "efforts_by_model": deepcopy(self.efforts_by_model),
             "environment": environment(self.settings), "login": self.login.snapshot(owner),
             "providers": self.providers(), "result": self.result,
             "routing": routing_snapshot(self.context.provider_manager),
@@ -229,6 +270,7 @@ class Onboarding:
             "action_hint": HINTS.get(self.action_error, "操作未完成，请重新检测或查看模型配置。") if self.action_error else "",
             "global_effort": self.settings.thought_level,
             "global_enable_tools": self.settings.enable_tools,
+            "global_enable_images": self.settings.enable_images,
         }
 
     async def _check(self, model="", effort="default"):
@@ -239,6 +281,12 @@ class Onboarding:
             self.report = report
 
         self.report = await probe(self.settings, details=True, model=model, effort=effort, progress=progress)
+        models = self.report.get("models")
+        if isinstance(models, list) and models:
+            self.cached_models = deepcopy(models)
+        selected = self.report.get("selected_model")
+        if isinstance(selected, str) and selected:
+            self.efforts_by_model[selected] = list(self.report.get("efforts") or [])
         return self.report
 
     def start_check(self, model=""):
@@ -262,31 +310,27 @@ class Onboarding:
 
         self.job = asyncio.create_task(run(), name="agy:setup-" + operation)
 
-    def start_apply(self, model, effort, use_default, tools_mode=None):
+    def start_apply(self, model, effort, use_default, tools_mode=None, create_only=False):
         self._available()
-        if not isinstance(effort, str) or effort not in {"default", "low", "medium", "high"} or type(use_default) is not bool:
+        if (
+            not isinstance(effort, str)
+            or effort not in {"default", "low", "medium", "high"}
+            or type(use_default) is not bool
+            or type(create_only) is not bool
+        ):
             raise AgyError("CONFIG", "模型档位或切换选项无效。")
         if tools_mode is not None and (
             not isinstance(tools_mode, str)
             or tools_mode not in {"inherit", "chat", "tools"}
         ):
             raise AgyError("CONFIG", "工具模式应为 inherit/chat/tools。")
-        if model not in {row["id"] for row in self.report.get("models", [])}:
+        if model not in {row["id"] for row in self._known_models()}:
             raise AgyError("MODEL", "请先检测并选择当前目录中的模型。")
-        self._launch("apply", lambda: self._apply(model, effort, use_default, tools_mode))
+        self._launch("apply", lambda: self._apply(model, effort, use_default, tools_mode, create_only))
 
-    async def _apply(self, model, effort, use_default, tools_mode=None):
-        # Always revalidate model and effort before changing host configuration.
-        actual_effort = self.settings.thought_level if effort == "default" else effort
-        report = await self._check(model, actual_effort)
-        if report.get("status") != "passed":
-            raise AgyError(report.get("error_code", "LOCAL"), "配置前检查未通过。")
-        # Host create/update persist configuration around awaited reloads.
-        # Finish that critical section before plugin shutdown removes adapters.
-        commit = asyncio.create_task(
-            self._save_provider(model, effort, use_default, tools_mode),
-            name="agy:save-provider",
-        )
+    async def _run_shielded(self, coro, name):
+        """在插件停用取消窗口内保护宿主持久化关键区完成。"""
+        commit = asyncio.create_task(coro, name=name)
         cancelled = None
         while True:
             try:
@@ -296,18 +340,31 @@ class Onboarding:
                 cancelled = cancelled or exc
                 if commit.done():
                     break
-        commit.result()
+        result = commit.result()
         if cancelled:
             raise cancelled
+        return result
 
-    async def _save_provider(self, model, effort, use_default, tools_mode=None):
-        from .provider import DEFAULT_CONFIG, PROVIDER_TYPE
+    async def _apply(self, model, effort, use_default, tools_mode=None, create_only=False):
+        # 修改宿主配置前始终复核模型与思考档位。
+        actual_effort = self.settings.thought_level if effort == "default" else effort
+        report = await self._check(model, actual_effort)
+        if report.get("status") != "passed":
+            raise AgyError(report.get("error_code", "LOCAL"), "配置前检查未通过。")
+        await self._run_shielded(
+            self._save_provider(model, effort, use_default, tools_mode, create_only=create_only),
+            "agy:save-provider",
+        )
+
+    async def _save_provider(self, model, effort, use_default, tools_mode=None, create_only=False):
+        DEFAULT_CONFIG, PROVIDER_TYPE = _provider_defaults()
 
         target_mode = "chat" if tools_mode is None else tools_mode
         match_any_mode = tools_mode is None
         manager = self.context.provider_manager
         source_id = await ensure_provider_source(manager)
         existing = None
+        existing_mode = "inherit"
         for candidate in list(manager.providers_config):
             merged = manager.get_merged_provider_config(candidate)
             candidate_model = merged.get("model") or (merged.get("model_config") or {}).get("model", "")
@@ -322,10 +379,19 @@ class Onboarding:
                 if existing is not None:
                     raise AgyError("CONFIG", "多个 ACP 实例匹配，请在模型管理中显式选择实例 ID。")
                 existing = candidate
+                existing_mode = candidate_mode
         if existing is not None:
+            if create_only:
+                raise AgyError("CONFIG", "已存在相同模型、思考档位与模式的实例，请直接编辑现有配置。")
             provider_id = existing["id"]
-            effective_mode = (existing.get("custom_extra_body") or {}).get("agy_tools_mode", "inherit")
-            await enable_provider(manager, provider_id, expected=deepcopy(existing), use_default=use_default)
+            effective_mode = existing_mode
+            await enable_provider(
+                manager,
+                provider_id,
+                expected=deepcopy(existing),
+                use_default=use_default,
+                modalities=compute_acp_modalities(self.settings, effective_mode),
+            )
         else:
             suffix_seed = (
                 f"{model}\0{effort}"
@@ -346,14 +412,10 @@ class Onboarding:
                 config["provider_source_id"] = source_id
             config["custom_extra_body"]["agy_thought_level"] = effort
             config["custom_extra_body"]["agy_tools_mode"] = target_mode
-            if self.settings.enable_tools and target_mode != "chat":
-                config["modalities"].append("tool_use")
-            if self.settings.enable_images:
-                config["modalities"].append("image")
+            config["modalities"] = compute_acp_modalities(self.settings, target_mode)
             await manager.create_provider(config)
             effective_mode = target_mode
-        # Host methods persist the provider and selected default; no second
-        # plugin state file can get out of sync after a restart.
+        # 由宿主持久化实例与全局默认，不维护第二套易漂移的插件状态文件。
         self.result = {
             "provider_id": provider_id,
             "model": model,
@@ -366,25 +428,111 @@ class Onboarding:
                 await select_default(manager, provider_id)
             self.result["default_selected"] = True
 
-    async def _manage(self, action, provider_id, enabled):
+    async def _update_provider(self, provider_id, model, effort, tools_mode):
+        manager = self.context.provider_manager
+        current = next((row for row in self.providers() if row["id"] == provider_id), None)
+        if current is None:
+            raise AgyError("CONFIG", "请选择现有的唯一 ACP 实例 ID。")
+        known_ids = {row["id"] for row in self._known_models()}
+        model_changed = current["model"] != model
+        effort_changed = current["thought_level"] != effort
+        cached_efforts = self.efforts_by_model.get(model, [])
+        needs_probe = (
+            (model_changed and model not in known_ids)
+            or (
+                effort != "default"
+                and (model_changed or effort_changed)
+                and effort not in cached_efforts
+            )
+        )
+        if needs_probe:
+            actual_effort = self.settings.thought_level if effort == "default" else effort
+            report = await self._check(model, actual_effort)
+            if report.get("status") != "passed":
+                raise AgyError(report.get("error_code", "LOCAL"), "配置前检查未通过。")
+        source_id = await ensure_provider_source(manager)
+        changed_model = await self._run_shielded(
+            update_acp_provider(
+                manager,
+                provider_id,
+                model=model,
+                effort=effort,
+                tools_mode=tools_mode,
+                settings=self.settings,
+                source_id=source_id,
+            ),
+            "agy:update-provider",
+        )
+        self.result = {
+            "provider_id": provider_id,
+            "model": model,
+            "thought_level": effort,
+            "tools_mode": tools_mode,
+            "model_changed": changed_model,
+            "applied": True,
+        }
+
+    async def _repair(self, provider_id=None):
+        manager = self.context.provider_manager
+        source_id = await ensure_provider_source(manager)
+        repaired_ids = await self._run_shielded(
+            repair_acp_providers(manager, self.settings, provider_id=provider_id, source_id=source_id),
+            "agy:repair-provider",
+        )
+        self.result = {
+            "provider_id": provider_id,
+            "repaired_ids": repaired_ids,
+            "applied": True,
+        }
+
+    async def _manage(self, action, provider_id, enabled=None, migrate_default_to=None, force_confirm=False):
         manager = self.context.provider_manager
         impact = provider_impact(manager, provider_id, self.overrides)
         self.result = {"provider_id": provider_id, "impact": impact, "applied": False}
         if action == "provider-default":
             await select_default(manager, provider_id)
-        elif action == "provider-toggle" and enabled:
-            await enable_provider(manager, provider_id)
+        elif action == "provider-toggle":
+            if enabled:
+                current = next((row for row in self.providers() if row["id"] == provider_id), {})
+                cur_mode = current.get("tools_mode", "inherit")
+                if cur_mode not in {"inherit", "chat", "tools"}:
+                    cur_mode = "inherit"
+                await enable_provider(
+                    manager,
+                    provider_id,
+                    modalities=compute_acp_modalities(self.settings, cur_mode),
+                )
+            else:
+                await disable_provider(
+                    manager,
+                    provider_id,
+                    migrate_default_to=migrate_default_to,
+                    force_confirm=force_confirm,
+                    observations=self.overrides,
+                )
+        elif action == "provider-delete":
+            await delete_acp_provider(
+                manager,
+                provider_id,
+                migrate_default_to=migrate_default_to,
+                force_confirm=force_confirm,
+                observations=self.overrides,
+            )
+            self.result.update(applied=True, impact=None)
+            return
         else:
-            # 4.29.4 cannot enumerate all overrides under the resource lock.
-            raise AgyError("REFERENCE_BLOCKED", "引用或扫描边界阻止此操作。")
+            raise AgyError("CONFIG", "未知的实例操作。")
         self.result.update(applied=True, impact=provider_impact(manager, provider_id, self.overrides))
 
     def register(self):
         manager = self.context.provider_manager
         if callable(getattr(manager, "register_provider_change_hook", None)):
             manager.register_provider_change_hook(self.override_hook)
-        for action in ("status", "check", "login", "login-code", "login-cancel", "apply",
-                       "provider-impact", "provider-default", "provider-delete", "provider-toggle"):
+        for action in (
+            "status", "check", "login", "login-code", "login-cancel", "apply",
+            "provider-impact", "provider-default", "provider-delete",
+            "provider-toggle", "provider-update", "provider-repair",
+        ):
             async def handler(action=action):
                 return await self.handle(action)
 
@@ -396,8 +544,7 @@ class Onboarding:
         from astrbot.api.web import error_response, json_response, request
 
         headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
-        # Dashboard validates its session before calling a registered handler.
-        # Check identity here too, including direct handler invocations.
+        # Dashboard 在分发前会校验会话；此处再次校验身份以防直接调用。
         if not request.username:
             return error_response("请先登录 AstrBot 管理面板。", status_code=401, headers=headers)
         if not dashboard_admin(self.context.provider_manager, request.username):
@@ -422,26 +569,71 @@ class Onboarding:
                 model = data.get("model", "")
                 if not isinstance(model, str) or len(model) > 1024:
                     raise AgyError("CONFIG", "模型 ID 无效。")
-                if action.startswith("provider-"):
+                if action == "provider-repair":
+                    self._available()
+                    if data.keys() == {"csrf", "all"} and data.get("all") is True:
+                        self._launch(action, lambda: self._repair(None))
+                    elif data.keys() == {"csrf", "provider_id"}:
+                        provider_id = data.get("provider_id")
+                        if not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 1024:
+                            raise AgyError("CONFIG", "实例 ID 无效。")
+                        self._launch(action, lambda: self._repair(provider_id))
+                    else:
+                        raise AgyError("CONFIG", "实例修复参数无效。")
+                elif action.startswith("provider-"):
                     self._available()
                     provider_id = data.get("provider_id")
                     if (not isinstance(provider_id, str) or not provider_id.strip()
                             or len(provider_id) > 1024):
                         raise AgyError("CONFIG", "实例 ID 无效。")
-                    fields = {"csrf", "provider_id"}
-                    if action != "provider-impact":
-                        fields.add("confirm")
-                    if action == "provider-toggle":
-                        fields.add("enabled")
-                    if data.keys() != fields:
-                        raise AgyError("CONFIG", "实例操作参数无效。")
                     if action == "provider-impact":
+                        if data.keys() != {"csrf", "provider_id"}:
+                            raise AgyError("CONFIG", "实例操作参数无效。")
                         impact = provider_impact(self.context.provider_manager, provider_id, self.overrides)
                         return json_response({"impact": impact}, headers=headers)
-                    if data["confirm"] is not True or (action == "provider-toggle"
-                                                       and type(data["enabled"]) is not bool):
-                        raise AgyError("CONFIG", "请明确确认实例操作和目标状态。")
-                    self._launch(action, lambda: self._manage(action, provider_id, data.get("enabled")))
+                    if action == "provider-update":
+                        if data.keys() != {"csrf", "provider_id", "model", "effort", "tools_mode"}:
+                            raise AgyError("CONFIG", "实例编辑参数无效。")
+                        effort = data.get("effort")
+                        tools_mode = data.get("tools_mode")
+                        if (
+                            not model.strip()
+                            or effort not in {"default", "low", "medium", "high"}
+                            or tools_mode not in {"inherit", "chat", "tools"}
+                        ):
+                            raise AgyError("CONFIG", "模型、思考强度或工具模式无效。")
+                        self._launch(action, lambda: self._update_provider(provider_id, model, effort, tools_mode))
+                    elif action == "provider-default":
+                        if data.keys() != {"csrf", "provider_id", "confirm"} or data["confirm"] is not True:
+                            raise AgyError("CONFIG", "请明确确认默认实例操作。")
+                        self._launch(action, lambda: self._manage(action, provider_id))
+                    elif action in {"provider-toggle", "provider-delete"}:
+                        required = {"csrf", "provider_id", "confirm"}
+                        if action == "provider-toggle":
+                            required.add("enabled")
+                        optional = {"migrate_default_to", "force_confirm"}
+                        if not required.issubset(data.keys()) or not set(data.keys()).issubset(required | optional):
+                            raise AgyError("CONFIG", "实例操作参数无效。")
+                        if data["confirm"] is not True or (action == "provider-toggle" and type(data["enabled"]) is not bool):
+                            raise AgyError("CONFIG", "请明确确认实例操作和目标状态。")
+                        migrate_default_to = data.get("migrate_default_to")
+                        if migrate_default_to is not None and (not isinstance(migrate_default_to, str) or len(migrate_default_to) > 1024):
+                            raise AgyError("CONFIG", "替代默认实例 ID 无效。")
+                        force_confirm = data.get("force_confirm", False)
+                        if type(force_confirm) is not bool:
+                            raise AgyError("CONFIG", "确认标记必须为布尔值。")
+                        self._launch(
+                            action,
+                            lambda: self._manage(
+                                action,
+                                provider_id,
+                                data.get("enabled"),
+                                migrate_default_to=migrate_default_to,
+                                force_confirm=force_confirm,
+                            ),
+                        )
+                    else:
+                        raise AgyError("CONFIG", "未知的实例操作。")
                 elif action == "check":
                     self.start_check(model)
                 elif action == "login":
@@ -459,6 +651,7 @@ class Onboarding:
                         data.get("effort", "default"),
                         data.get("use_default", False),
                         data.get("tools_mode"),
+                        data.get("create_only", False),
                     )
             return json_response(self.snapshot(request.username), headers=headers)
         except AgyError as exc:

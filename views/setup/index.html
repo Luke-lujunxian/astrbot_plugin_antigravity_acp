@@ -24,127 +24,181 @@
     </header>
 
     <div id="error" class="alert alert-error" role="alert" hidden></div>
+    <div id="route-alert" class="alert alert-error alert-row" role="alert" hidden></div>
+    <div id="drift-alert" class="alert alert-warn alert-row" role="status" hidden></div>
 
-    <section class="card monitor" id="monitor" aria-labelledby="monitor-heading">
-      <div class="card-head">
-        <div class="card-title">
-          <h2 id="monitor-heading">运行监控</h2>
+    <nav class="v-tabs" aria-label="主视图">
+      <button id="tab-btn-monitor" class="v-tab is-active" data-tab="monitor" type="button">运行监控</button>
+      <button id="tab-btn-models" class="v-tab" data-tab="models" type="button">模型管理</button>
+      <button id="tab-btn-setup" class="v-tab" data-tab="setup" type="button">环境与认证</button>
+    </nav>
+
+    <!-- Tab 1（首页）：运行监控 -->
+    <section id="tab-monitor">
+      <section class="card monitor" id="monitor" aria-labelledby="monitor-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <h2 id="monitor-heading">运行监控</h2>
+          </div>
+          <div class="card-head-actions">
+            <span id="monitor-updated" class="small"></span>
+            <span id="monitor-badge" class="badge">正在加载</span>
+            <button id="monitor-refresh" class="btn btn-sm" type="button" disabled>刷新</button>
+          </div>
         </div>
-        <div class="card-head-actions">
-          <span id="monitor-updated" class="small"></span>
-          <span id="monitor-badge" class="badge">正在加载</span>
-          <button id="monitor-refresh" class="btn btn-sm" type="button" disabled>刷新</button>
+        <div class="card-body">
+          <div class="routing-strip">
+            <div class="routing-strip-main">
+              <span class="small">全局默认</span>
+              <strong id="routing-strip-text" class="meta-primary">正在读取…</strong>
+              <span id="routing-strip-badge" class="badge">未知</span>
+              <span id="routing-strip-meta" class="small"></span>
+            </div>
+            <div class="routing-strip-actions">
+              <button id="goto-models" class="btn btn-ghost btn-sm" type="button">管理模型 →</button>
+            </div>
+          </div>
+
+          <p id="monitor-message" class="hint-text" role="status">正在读取…</p>
+          <details class="drawer"><summary>路由详情</summary><dl id="routing-summary" class="kv-list drawer-body"></dl></details>
+          <div id="monitor-instances" class="monitor-instances"></div>
+          <details class="drawer"><summary>持久失败诊断</summary><div class="drawer-body"><p id="failure-storage" class="small"></p><div id="persistent-failures" class="provider-list"></div></div></details>
         </div>
-      </div>
-      <div class="card-body">
-        <p id="monitor-message" class="hint-text" role="status">正在读取…</p>
-        <details class="drawer"><summary>模型路由</summary><dl id="routing-summary" class="kv-list drawer-body"></dl></details>
-        <div id="monitor-instances" class="monitor-instances"></div>
-        <details class="drawer"><summary>持久失败诊断</summary><div class="drawer-body"><p id="failure-storage" class="small"></p><div id="persistent-failures" class="provider-list"></div></div></details>
-      </div>
+      </section>
     </section>
 
-    <ol id="setup-progress" class="setup-progress" aria-label="设置进度"></ol>
-
-    <div class="grid">
-      <!-- 01 运行环境 -->
-      <section class="card" id="environment-step" aria-labelledby="environment-heading">
-        <div class="card-head">
-          <div class="card-title">
-            <span class="step-index">01</span>
-            <h2 id="environment-heading">运行环境</h2>
-          </div>
-          <span id="check-badge" class="badge">等待检测</span>
-        </div>
-        <div class="card-body">
-          <div class="meta-line">
-            <span id="environment" class="meta-primary">正在读取系统信息…</span>
-          </div>
-          <div id="facts" class="facts"></div>
-          <p id="check-hint" class="hint-text" role="status"></p>
-          <div class="card-actions">
-            <button id="check" class="btn" type="button" disabled>重新检测</button>
-          </div>
-          <details id="env-diagnostics" class="drawer">
-            <summary>高级诊断</summary>
-            <div class="drawer-body">
-              <p id="discovery-hint" class="small"></p>
-              <dl id="env-diag-list" class="kv-list"></dl>
-            </div>
-          </details>
-          <details id="install-details" class="drawer">
-            <summary>CLI 安装与路径</summary>
-            <div class="drawer-body">
-              <p id="install-hint" class="small"></p>
-              <label for="install-command">安装命令</label>
-              <div class="copy-row">
-                <input id="install-command" readonly>
-                <button id="copy-command" class="btn btn-sm" type="button">复制</button>
-              </div>
-              <label for="install-url">官方文档</label>
-              <div class="copy-row">
-                <input id="install-url" readonly>
-                <button id="copy-install" class="btn btn-sm" type="button">复制</button>
-              </div>
-            </div>
-          </details>
-        </div>
-      </section>
-
-      <!-- 02 账号认证 -->
-      <section class="card" id="login-step" aria-labelledby="login-heading">
-        <div class="card-head">
-          <div class="card-title">
-            <span class="step-index">02</span>
-            <h2 id="login-heading">Google 账号认证</h2>
-          </div>
-          <span id="login-badge" class="badge">等待检查</span>
-        </div>
-        <div class="card-body">
-          <p id="login-hint" class="hint-text"></p>
-          <div class="card-actions">
-            <button id="login" class="btn" type="button" disabled>官方登录</button>
-            <button id="cancel-login" class="btn btn-ghost" type="button" hidden>取消</button>
-          </div>
-          <div id="authorization" class="auth-box" hidden>
-            <label for="auth-url">1. 打开授权链接</label>
-            <div class="copy-row">
-              <input id="auth-url" readonly autocomplete="off" spellcheck="false">
-              <button id="copy-auth" class="btn btn-sm" type="button">复制链接</button>
-              <button id="open-auth" class="btn btn-sm" type="button">打开链接</button>
-            </div>
-            <form id="code-form" autocomplete="off">
-              <label for="auth-code">2. 粘贴授权码</label>
-              <div class="copy-row">
-                <input id="auth-code" type="password" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="粘贴一次性授权码" required>
-                <button id="submit-code" class="btn btn-primary btn-sm" type="submit">提交</button>
-              </div>
-            </form>
-          </div>
-          <details class="drawer">
-            <summary>终端命令行登录</summary>
-            <div class="drawer-body">
-              <p class="small">在 AstrBot 同运行用户下执行 <code>agy acp --login</code>，完成后点击「重新检测」。</p>
-            </div>
-          </details>
-        </div>
-      </section>
-
-      <!-- 03 模型配置 -->
+    <!-- Tab 2：模型管理 -->
+    <section id="tab-models" hidden>
       <section class="card" id="model-step" aria-labelledby="model-heading">
         <div class="card-head">
           <div class="card-title">
-            <span class="step-index">03</span>
-            <h2 id="model-heading">模型配置</h2>
+            <h2 id="model-heading">ACP 模型</h2>
+            <span id="model-badge" class="badge">等待登录</span>
+            <span id="finish-badge" class="badge">等待配置</span>
           </div>
-          <span id="model-badge" class="badge">等待登录</span>
+          <div class="card-head-actions">
+            <button id="refresh-catalog" class="btn btn-sm" type="button" disabled>刷新目录</button>
+            <button id="open-add-model" class="btn btn-primary btn-sm" type="button" disabled>添加模型</button>
+          </div>
         </div>
         <div class="card-body">
+          <p id="finish-hint" class="hint-text"></p>
+          <div id="configured" class="provider-list"></div>
+        </div>
+      </section>
+    </section>
+
+    <!-- Tab 3：环境与认证 -->
+    <section id="tab-setup" hidden>
+      <ol id="setup-progress" class="setup-progress" aria-label="设置进度"></ol>
+
+      <div class="grid">
+        <!-- 01 运行环境 -->
+        <section class="card" id="environment-step" aria-labelledby="environment-heading">
+          <div class="card-head">
+            <div class="card-title">
+              <span class="step-index">01</span>
+              <h2 id="environment-heading">运行环境</h2>
+            </div>
+            <span id="check-badge" class="badge">等待检测</span>
+          </div>
+          <div class="card-body">
+            <div class="meta-line">
+              <span id="environment" class="meta-primary">正在读取系统信息…</span>
+            </div>
+            <div id="facts" class="facts"></div>
+            <p id="global-policy-summary" class="small"></p>
+            <p id="check-hint" class="hint-text" role="status"></p>
+            <div class="card-actions">
+              <button id="check" class="btn" type="button" disabled>重新检测</button>
+            </div>
+            <details id="env-diagnostics" class="drawer">
+              <summary>高级诊断</summary>
+              <div class="drawer-body">
+                <p id="discovery-hint" class="small"></p>
+                <dl id="env-diag-list" class="kv-list"></dl>
+              </div>
+            </details>
+            <details id="install-details" class="drawer">
+              <summary>CLI 安装与路径</summary>
+              <div class="drawer-body">
+                <p id="install-hint" class="small"></p>
+                <label for="install-command">安装命令</label>
+                <div class="copy-row">
+                  <input id="install-command" readonly>
+                  <button id="copy-command" class="btn btn-sm" type="button">复制</button>
+                </div>
+                <label for="install-url">官方文档</label>
+                <div class="copy-row">
+                  <input id="install-url" readonly>
+                  <button id="copy-install" class="btn btn-sm" type="button">复制</button>
+                </div>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <!-- 02 账号认证 -->
+        <section class="card" id="login-step" aria-labelledby="login-heading">
+          <div class="card-head">
+            <div class="card-title">
+              <span class="step-index">02</span>
+              <h2 id="login-heading">Google 账号认证</h2>
+            </div>
+            <span id="login-badge" class="badge">等待检查</span>
+          </div>
+          <div class="card-body">
+            <p id="login-hint" class="hint-text"></p>
+            <div class="card-actions">
+              <button id="login" class="btn" type="button" disabled>官方登录</button>
+              <button id="cancel-login" class="btn btn-ghost" type="button" hidden>取消</button>
+            </div>
+            <div id="authorization" class="auth-box" hidden>
+              <label for="auth-url">1. 打开授权链接</label>
+              <div class="copy-row">
+                <input id="auth-url" readonly autocomplete="off" spellcheck="false">
+                <button id="copy-auth" class="btn btn-sm" type="button">复制链接</button>
+                <button id="open-auth" class="btn btn-sm" type="button">打开链接</button>
+              </div>
+              <form id="code-form" autocomplete="off">
+                <label for="auth-code">2. 粘贴授权码</label>
+                <div class="copy-row">
+                  <input id="auth-code" type="password" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="粘贴一次性授权码" required>
+                  <button id="submit-code" class="btn btn-primary btn-sm" type="submit">提交</button>
+                </div>
+              </form>
+            </div>
+            <details class="drawer">
+              <summary>终端命令行登录</summary>
+              <div class="drawer-body">
+                <p class="small">在 AstrBot 同运行用户下执行 <code>agy acp --login</code>，完成后点击「重新检测」。</p>
+              </div>
+            </details>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- 弹窗 1：添加 / 编辑模型 -->
+    <div id="modal-form" class="modal-backdrop" hidden>
+      <section class="card modal-card" aria-labelledby="modal-form-title">
+        <div class="card-head">
+          <h2 id="modal-form-title">添加模型</h2>
+          <button id="modal-close" class="btn btn-ghost btn-sm" type="button">关闭</button>
+        </div>
+        <div class="card-body">
+          <div id="form-id-row" class="routing-strip" hidden>
+            <span class="small">实例 ID</span>
+            <code id="form-id-val"></code>
+          </div>
           <form id="model-form">
             <div class="fields">
               <div class="field field-wide">
                 <label for="model">Gemini 模型</label>
                 <select id="model" disabled><option value="">先完成环境检测</option></select>
+              </div>
+              <div id="form-model-warn" class="alert alert-warn field-wide" hidden>
+                更换底层模型后，下次对话将重建会话上下文，原有 ID 绑定保留。
               </div>
               <div class="field">
                 <label for="effort">思考强度</label>
@@ -154,34 +208,45 @@
                 <label for="tools-mode">实例模式</label>
                 <select id="tools-mode" disabled>
                   <option value="chat">纯聊天</option>
-                  <option value="inherit">跟随全局开关</option>
+                  <option value="inherit">跟随总闸</option>
                   <option value="tools">工具模式</option>
                 </select>
               </div>
             </div>
-            <label class="checkbox">
+            <div id="form-dup-warn" class="alert alert-warn" hidden>
+              已存在完全相同的配置，无需重复添加。
+            </div>
+            <label id="use-default-row" class="checkbox">
               <input id="use-default" type="checkbox">
               <span>设为全局默认模型</span>
             </label>
-            <div class="card-actions">
-              <button id="apply" class="btn btn-primary" type="submit" disabled>保存并启用</button>
+            <div class="modal-foot">
+              <button id="modal-cancel" class="btn btn-ghost" type="button">取消</button>
+              <button id="apply" class="btn btn-primary" type="submit" disabled>保存</button>
             </div>
           </form>
         </div>
       </section>
+    </div>
 
-      <!-- 04 已保存实例 -->
-      <section class="card" id="finish-step" aria-labelledby="finish-heading">
+    <!-- 弹窗 2：停用 / 删除影响预览与安全迁移 -->
+    <div id="modal-impact" class="modal-backdrop" hidden>
+      <section class="card modal-card" aria-labelledby="impact-title">
         <div class="card-head">
-          <div class="card-title">
-            <span class="step-index">04</span>
-            <h2 id="finish-heading">已启用实例</h2>
-          </div>
-          <span id="finish-badge" class="badge">等待配置</span>
+          <h2 id="impact-title">确认操作</h2>
+          <button id="impact-close" class="btn btn-ghost btn-sm" type="button">关闭</button>
         </div>
         <div class="card-body">
-          <p id="finish-hint" class="hint-text"></p>
-          <div id="configured" class="provider-list"></div>
+          <div id="impact-kv" class="impact-list"></div>
+          <div id="impact-mig-wrap" class="field" hidden>
+            <label for="impact-mig-select">将全局默认切换为</label>
+            <select id="impact-mig-select"></select>
+          </div>
+          <p class="small">未全库扫描重启前会话绑定；下线后旧会话将回落到全局默认。</p>
+          <div class="modal-foot">
+            <button id="impact-cancel" class="btn btn-ghost" type="button">取消</button>
+            <button id="impact-confirm" class="btn btn-danger-soft" type="button">确认</button>
+          </div>
         </div>
       </section>
     </div>

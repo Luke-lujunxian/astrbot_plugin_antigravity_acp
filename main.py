@@ -15,7 +15,11 @@ from .agy_provider.errors import AgyError
 from .agy_provider.host_compat import install_host_compat, uninstall_host_compat
 from .agy_provider.onboarding import Onboarding, ensure_provider_source, next_step
 from .agy_provider.monitoring import Monitoring
-from .agy_provider.routing import routing_snapshot
+from .agy_provider.routing import (
+    compute_acp_modalities,
+    routing_snapshot,
+    sync_current_provider_pointer,
+)
 from .agy_provider.paths import cleanup_stale_dirs, plugin_data_root
 from .agy_provider.provider import (
     DEFAULT_CONFIG,
@@ -194,10 +198,7 @@ class AgyProviderPlugin(Star):
         configure(settings)
         unregister_owned_adapter()
         template = deepcopy(DEFAULT_CONFIG)
-        if settings.enable_tools:
-            template["modalities"].append("tool_use")
-        if settings.enable_images:
-            template["modalities"].append("image")
+        template["modalities"] = compute_acp_modalities(settings, "inherit")
         registry.register_provider_adapter(
             PROVIDER_TYPE,
             "本机官方 AGY CLI / ACP Gemini 模型（支持 custom_extra_body.agy_tools_mode=inherit|chat|tools）",
@@ -229,6 +230,7 @@ class AgyProviderPlugin(Star):
                     except Exception:
                         logger.error("AGY provider 重载失败，请在模型设置重新启用。")
         setattr(manager, RESTORE_IDS, set())
+        sync_current_provider_pointer(manager)
         logger.info(
             "已注册 agy_acp。打开插件详情 → 首次设置，或发送 /agy setup 开始引导。"
         )

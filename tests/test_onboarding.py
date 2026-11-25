@@ -272,6 +272,8 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             "provider-default",
             "provider-toggle",
             "provider-delete",
+            "provider-update",
+            "provider-repair",
         )
         self.request.username = ""
         for action in actions:
@@ -327,7 +329,7 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         own = list(self.context.registered_web_apis)
         other = (own[0][0], AsyncMock(), ["GET"], "another instance")
         self.context.registered_web_apis.append(other)
-        self.assertEqual(len(own), 10)
+        self.assertEqual(len(own), 12)
         await self.service.close()
         self.assertEqual(self.context.registered_web_apis, [other])
         self.assertEqual((await self.call("status"))["status_code"], 400)
@@ -680,6 +682,95 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(bad["status_code"], 400)
+
+    async def test_provider_update_preserves_id_recomputes_modalities_and_repair_fixes_drift(self):
+        self.service.settings = Settings(enable_tools=True, enable_images=True, thought_level="medium")
+        self.service.efforts_by_model["gemini-test"] = ["low", "medium", "high"]
+        resp = await self.call(
+            "apply",
+            {
+                "csrf": self.service.csrf,
+                "model": "gemini-test",
+                "effort": "low",
+                "tools_mode": "chat",
+                "use_default": False,
+            },
+        )
+        self.assertEqual(resp["status_code"], 200)
+        await self.service.job
+        pid = self.service.result["provider_id"]
+        self.assertEqual(self.manager.providers_config[0]["modalities"], ["text", "image"])
+
+        # create_only=True 拒绝重复创建相同变体
+        dup = await self.call(
+            "apply",
+            {
+                "csrf": self.service.csrf,
+                "model": "gemini-test",
+                "effort": "low",
+                "tools_mode": "chat",
+                "use_default": False,
+                "create_only": True,
+            },
+        )
+        self.assertEqual(dup["status_code"], 200)
+        await self.service.job
+        self.assertEqual(self.service.action_error, "CONFIG")
+
+        # 就地编辑保留原 provider_id，并重算 modalities
+        upd = await self.call(
+            "provider-update",
+            {
+                "csrf": self.service.csrf,
+                "provider_id": pid,
+                "model": "gemini-test",
+                "effort": "high",
+                "tools_mode": "tools",
+            },
+        )
+        self.assertEqual(upd["status_code"], 200)
+        await self.service.job
+        self.assertEqual(self.service.action_error, "")
+        self.assertTrue(self.service.result["applied"])
+        self.assertFalse(self.service.result["model_changed"])
+        cfg = self.manager.providers_config[0]
+        self.assertEqual(cfg["id"], pid)
+        self.assertEqual(cfg["custom_extra_body"]["agy_thought_level"], "high")
+        self.assertEqual(cfg["custom_extra_body"]["agy_tools_mode"], "tools")
+        self.assertEqual(cfg["modalities"], ["text", "tool_use", "image"])
+
+        # 模拟原生页面写入 audio 模态与非法 extra 字段，并验证 providers() 检出与修复
+        cfg["modalities"] = ["text", "image", "audio", "tool_use"]
+        cfg["custom_extra_body"]["agy_thought_level"] = "ultra"
+        cfg["custom_extra_body"]["agy_tools_mode"] = "bogus"
+        rows = self.service.providers()
+        self.assertTrue(rows[0]["config_drifted"])
+        self.assertFalse(rows[0]["effective_tools"])
+        self.assertIn("UNSUPPORTED_AUDIO_MODALITY", rows[0]["config_errors"])
+        self.assertIn("INVALID_THOUGHT_LEVEL", rows[0]["config_errors"])
+        self.assertIn("INVALID_TOOLS_MODE", rows[0]["config_errors"])
+
+        rep = await self.call("provider-repair", {"csrf": self.service.csrf, "all": True})
+        self.assertEqual(rep["status_code"], 200)
+        await self.service.job
+        self.assertEqual(self.service.result["repaired_ids"], [pid])
+        self.assertEqual(cfg["custom_extra_body"]["agy_thought_level"], "default")
+        self.assertEqual(cfg["custom_extra_body"]["agy_tools_mode"], "inherit")
+        self.assertEqual(cfg["modalities"], ["text", "tool_use", "image"])
+        self.assertFalse(self.service.providers()[0]["config_drifted"])
+
+    async def test_providers_reads_merged_enable_and_caches_catalog_across_pending_reports(self):
+        self.manager.provider_sources_config.append(
+            {"id": "agy_acp", "type": "agy_acp", "provider_type": "chat_completion", "enable": True}
+        )
+        self.manager.providers_config.append(
+            {"id": "inherited_row", "type": "agy_acp", "provider_source_id": "agy_acp", "model": "gemini-test"}
+        )
+        self.service.cached_models = [{"id": "gemini-test", "name": "Gemini Test"}]
+        self.service.report = {"status": "pending", "stage": "authentication"}
+        snap = self.service.snapshot("admin")
+        self.assertEqual(snap["cached_models"], [{"id": "gemini-test", "name": "Gemini Test"}])
+        self.assertTrue(snap["providers"][0]["enabled"])
 
 
 if __name__ == "__main__":

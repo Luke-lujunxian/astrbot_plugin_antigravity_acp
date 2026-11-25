@@ -315,6 +315,40 @@ class MainInitializeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plugin.registered)
         self.assertNotIn("provider_source_id", manager.providers_config[0])
 
+    async def test_initialize_restores_curr_provider_inst_to_configured_primary(self):
+        main_mod, _ = self._load_main_module()
+        manager = FakeProviderManager()
+        non_acp = object()
+        acp_inst = object()
+        manager.inst_map = {"openai_first": non_acp, "agy_primary": acp_inst}
+        manager.provider_insts = [non_acp]
+        manager.curr_provider_inst = non_acp
+        manager.providers_config.extend([
+            {"id": "openai_first", "type": "openai", "enable": True},
+            {"id": "agy_primary", "type": "agy_acp", "model": "gemini-test", "enable": True},
+        ])
+        manager.acm.default_conf["agent_runner"] = {
+            "runner_type": "local",
+            "config": {"model": {"provider_id": "agy_primary", "fallback_provider_ids": []}},
+        }
+
+        async def reload_with_implicit_first(config):
+            manager.inst_map[config["id"]] = acp_inst
+            manager.provider_insts.append(acp_inst)
+            # 模拟宿主 reload() 在 curr_provider_inst 为空时漂移回第一个非 ACP 实例
+            manager.curr_provider_inst = non_acp
+
+        manager.reload = reload_with_implicit_first
+        setattr(manager, main_mod.RESTORE_IDS, {"agy_primary"})
+        plugin = main_mod.AgyProviderPlugin(
+            self._make_context(manager), config=FakePluginConfig({"setup_auto_check": False})
+        )
+        self.addAsyncCleanup(plugin.terminate)
+
+        await plugin.initialize()
+
+        self.assertIs(manager.curr_provider_inst, acp_inst)
+
 
 if __name__ == "__main__":
     unittest.main()
