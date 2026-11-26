@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._version import PLUGIN_VERSION
-from .builtin_tools import BUILTINS, BuiltinDenied, read_target, supports_read
+from .builtin_tools import BUILTINS, SEARCH_ABORTED_NOTICE, BuiltinDenied, read_target, supports_read
 from .config import Settings
 from .context_usage import ContextUsage
 from .errors import AgyError, classified_error, remote_error
@@ -590,7 +590,7 @@ class AcpClient:
                 self.tool_broker.observe(update)
                 return
             if isinstance(update.get("name"), str) and update["name"] in BUILTINS:
-                raise BuiltinDenied("TOOLS_DISABLED")
+                raise BuiltinDenied("TOOLS_DISABLED", SEARCH_ABORTED_NOTICE, user_notice=SEARCH_ABORTED_NOTICE)
             raise AgyError(
                 "TOOLS_DISABLED",
                 "AGY 尝试调用内置工具；已中止该轮，请检查 CLI 对无工具 agent 的支持。",

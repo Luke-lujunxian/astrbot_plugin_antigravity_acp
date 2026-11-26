@@ -376,6 +376,7 @@ class ToolBroker:
         self.read_decisions = {}
         self.search_calls = {}
         self.search_seen = set()
+        self.search_args = {}
         self.on_builtin_call = None
         self.error = None
         self.close_task = None
@@ -633,15 +634,17 @@ class ToolBroker:
                 or self.settings.builtin_search_web != "allow"
                 or not ident or len(ident) > 256 or ident in self.notifications
                 or ident in self.read_calls or ident in self.read_decisions):
-            raise BuiltinDenied(user_notice=SEARCH_ABORTED_NOTICE)
+            raise BuiltinDenied(message=SEARCH_ABORTED_NOTICE, user_notice=SEARCH_ABORTED_NOTICE)
         status = update.get("status")
         if ident in self.search_calls:
             if (update.get("sessionUpdate") != "tool_call_update"
                     or update.get("name", "search_web") != "search_web"
                     or update.get("kind", "search") != "search"
                     or self.search_calls[ident] != "in_progress"
-                    or status not in ("in_progress", "completed", "failed")):
-                raise BuiltinDenied()
+                    or status not in ("in_progress", "completed", "failed")
+                    or ("rawInput" in update and update["rawInput"] != self.search_args[ident])
+                    or ("args" in update and update["args"] != self.search_args[ident])):
+                raise BuiltinDenied(message=SEARCH_ABORTED_NOTICE)
             self.search_calls[ident] = status
             return
 
@@ -657,8 +660,9 @@ class ToolBroker:
         self.count += 1
         if self.on_builtin_call:
             self.on_builtin_call(observed=True)
+        self.search_args[ident] = args
         if over_budget:
-            raise BuiltinDenied("TOOL_BUDGET", "检测到超预算的 CLI 联网搜索，已中止本轮。搜索请求可能已发出。",
+            raise BuiltinDenied("TOOL_BUDGET", "检测到超预算的 CLI 联网搜索，已中止本轮；搜索请求可能已经发出。",
                                 user_notice=SEARCH_ABORTED_NOTICE)
         self.search_seen.add(ident)
         self.search_calls[ident] = status

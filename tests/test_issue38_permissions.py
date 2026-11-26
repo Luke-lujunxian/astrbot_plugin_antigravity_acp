@@ -186,7 +186,18 @@ class SearchPermissionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(BuiltinDenied):
             broker.observe(call)
 
-    async def test_search_denial_notice_admits_the_search_may_already_have_run(self):
+    async def test_search_update_cannot_change_its_arguments(self):
+        broker = self.make_broker(tool_max_calls=4)
+        broker.observe(self.search())
+        update = {"toolCallId": "search-1", "sessionUpdate": "tool_call_update", "status": "in_progress",
+                  "rawInput": {"query": "synthetic search"}, "args": {"query": "synthetic search"}}
+        broker.observe(update)
+        for key in ("rawInput", "args"):
+            with self.subTest(key), self.assertRaises(BuiltinDenied) as caught:
+                broker.observe({**update, key: {"query": "other"}})
+            self.assertIn("搜索请求可能已经发出", str(caught.exception))
+
+    async def test_tools_disabled_search_notice_admits_the_search_may_already_have_run(self):
         for broker in (self.make_broker(builtin_search_web="deny"), self.make_broker(tool_max_calls=0)):
             with self.assertRaises(BuiltinDenied) as caught:
                 broker.observe(self.search())
