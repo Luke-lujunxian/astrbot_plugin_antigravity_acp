@@ -86,27 +86,21 @@ const toolCapabilityLabels = {
 };
 
 const toolSourceSections = {
-  mcp: {
-    title: "AstrBot MCP 桥接工具",
-    desc: "由 AstrBot 宿主按每轮快照提供并执行审批，通过一次性许可桥接。",
-  },
-  builtin: {
-    title: "AGY CLI 内置工具",
-    desc: "默认全部关闭；仅已支持或实验性工具可在本页调整，调用会计入每轮工具调用次数。",
-  },
+  mcp: {title: "AstrBot MCP 工具", desc: ""},
+  builtin: {title: "AGY CLI 内置工具", desc: ""},
 };
 
 // 契约注册的聊天管理员指令清单
 const adminCommands = [
-  {cmd: "/agy help", copy: "/agy help", desc: "列出所有可用指令与参数说明"},
-  {cmd: "/agy setup", copy: "/agy setup", desc: "查看设置入口及已有模型实例"},
-  {cmd: "/agy use <provider_id>", copy: "/agy use ", desc: "切换当前会话使用的模型实例（如 /agy use agy-main）"},
-  {cmd: "/agy cost", copy: "/agy cost", desc: "查看本地成本与会话复用统计"},
-  {cmd: "/agy doctor", copy: "/agy doctor", desc: "执行无生成环境与认证自检"},
+  {cmd: "/agy help", copy: "/agy help", desc: "列出全部指令"},
+  {cmd: "/agy setup", copy: "/agy setup", desc: "面板入口与已有实例"},
+  {cmd: "/agy use <provider_id>", copy: "/agy use ", desc: "切换当前会话模型实例"},
+  {cmd: "/agy cost", copy: "/agy cost", desc: "近 24 小时成本与复用统计"},
+  {cmd: "/agy doctor", copy: "/agy doctor", desc: "环境与连接自检"},
   {cmd: "/agy quota", copy: "/agy quota", desc: "查询官方 CLI 账号剩余额度"},
-  {cmd: "/agy status", copy: "/agy status", desc: "查看已加载实例及运行状态"},
-  {cmd: "/agy models", copy: "/agy models", desc: "查看已配置模型与实例 ID"},
-  {cmd: "/agy usage [30|90|365]", copy: "/agy usage 90", desc: "查看本地每日统计摘要及最近 28 天文本热力图（默认 90 天）"},
+  {cmd: "/agy status", copy: "/agy status", desc: "查看已加载实例与运行状态"},
+  {cmd: "/agy models", copy: "/agy models", desc: "查看已配置模型与切换命令"},
+  {cmd: "/agy usage [30|90|365]", copy: "/agy usage 90", desc: "本地每日用量与 28 天热力图"},
 ];
 
 function formatFaultBrief(code) {
@@ -1745,21 +1739,30 @@ function renderToolPolicy() {
       const top = el("div", "tool-row-top");
       const info = el("div", "tool-row-info");
 
+      const isSwitch = isBinaryAllowSwitch(tool);
+      const editable = isToolEditable(tool);
+      const currentVal = editable ? (toolPolicyDraft[tool.id] ?? tool.policy) : tool.policy;
+      const rowReloadRequired = isToolReloadRequired(tool, policy);
+      const isLockedDeny = !editable && !rowReloadRequired && tool.source !== "mcp" && currentVal === "deny";
+      if (!editable && !rowReloadRequired) row.dataset.readonly = "true";
+
       const titleRow = el("div", "tool-row-title");
       titleRow.append(el("strong", "", tool.purpose || tool.id || "未命名工具"));
       if (tool.id) titleRow.append(el("code", "", tool.id));
 
-      // 风险徽标
-      const riskInfo = toolRiskLabels[tool.risk];
-      if (riskInfo) {
-        const riskBadge = el("span", "badge", riskInfo.text);
-        if (riskInfo.state) riskBadge.dataset.state = riskInfo.state;
-        titleRow.append(riskBadge);
-      } else if (tool.risk) {
-        titleRow.append(el("span", "badge", String(tool.risk)));
+      // 仅对可配置工具展示风险徽标；宿主管控与固定拒绝项保持精简
+      if (!isLockedDeny && tool.risk && tool.risk !== "host") {
+        const riskInfo = toolRiskLabels[tool.risk];
+        if (riskInfo) {
+          const riskBadge = el("span", "badge", riskInfo.text);
+          if (riskInfo.state) riskBadge.dataset.state = riskInfo.state;
+          titleRow.append(riskBadge);
+        } else {
+          titleRow.append(el("span", "badge", String(tool.risk)));
+        }
       }
 
-      // 能力状态徽标（unverified / unsupported 明确标识）
+      // 能力状态徽标（experimental / unverified / unsupported）
       if (tool.capability && tool.capability !== "supported") {
         const capInfo = toolCapabilityLabels[tool.capability] || {text: "能力未知", state: "warn"};
         const capBadge = el("span", "badge", capInfo.text);
@@ -1767,13 +1770,12 @@ function renderToolPolicy() {
         titleRow.append(capBadge);
       }
 
-      // 生效状态徽标（逐行感知 reload_required，避免高风险关闭待重载仍显示绿色「当前生效」）
-      const isSwitch = isBinaryAllowSwitch(tool);
-      const rowReloadRequired = isToolReloadRequired(tool, policy);
-      let effText = "状态未知", effState = "";
+      // 生效状态徽标（固定拒绝项已有状态与右侧标签，不重复堆叠「未生效」）
+      let effText = "", effState = "";
       if (masterKnown && !masterEnabled) {
-        effText = "未生效（总闸关闭）";
-        effState = "";
+        if (!isLockedDeny) {
+          effText = "未生效（总闸关闭）";
+        }
       } else if (rowReloadRequired) {
         const currentStateText = tool.effective === true ? "当前生效" : tool.effective === false ? "当前未生效" : "待重载";
         const nextStateText = formatPendingTargetLabel(tool.policy, isSwitch);
@@ -1782,32 +1784,22 @@ function renderToolPolicy() {
       } else if (tool.effective === true) {
         effText = "当前生效";
         effState = "ready";
-      } else if (tool.effective === false) {
+      } else if (tool.effective === false && !isLockedDeny) {
         effText = "未生效";
-        effState = "";
       }
       if (rowReloadRequired && (!masterKnown || masterEnabled)) {
         row.dataset.reloadPending = "true";
       }
-      const effBadge = el("span", "badge", effText);
-      if (effState) effBadge.dataset.state = effState;
-      titleRow.append(effBadge);
+      if (effText) {
+        const effBadge = el("span", "badge", effText);
+        if (effState) effBadge.dataset.state = effState;
+        titleRow.append(effBadge);
+      }
 
       info.append(titleRow);
 
-      // 不可切换工具的能力说明
-      if (tool.capability === "unverified") {
-        info.append(el("p", "small", "当前系统环境或 CLI 握手尚未确认支持此工具，保持拒绝，不可开启。"));
-      } else if (tool.capability === "unsupported") {
-        info.append(el("p", "small", "当前版本或安全边界不支持此工具，保持拒绝，不可开启。"));
-      } else if (tool.source === "mcp") {
-        info.append(el("p", "small", "工具列表由宿主每轮快照决定，执行仍由宿主审批与隔离。"));
-      }
-
       // 策略控件：由 capability 与 choices 驱动；二元 deny/allow 渲染独立开关，其余渲染分段切换
       const controlWrap = el("div", "tool-row-control");
-      const editable = isToolEditable(tool);
-      const currentVal = editable ? (toolPolicyDraft[tool.id] ?? tool.policy) : tool.policy;
 
       if (isSwitch) {
         const isOn = currentVal === "allow";
@@ -1853,31 +1845,28 @@ function renderToolPolicy() {
         controlWrap.append(seg);
       } else {
         const roLabel = tool.source === "mcp"
-          ? `${toolPolicyChoiceLabels[currentVal] || currentVal || "未知"}（宿主管控）`
-          : `${toolPolicyChoiceLabels[currentVal] || currentVal || "拒绝"}（只读）`;
+          ? "宿主管控"
+          : (currentVal === "deny" ? "已拒绝" : (toolPolicyChoiceLabels[currentVal] || currentVal || "已拒绝"));
         controlWrap.append(el("span", "policy-readonly", roLabel));
       }
 
       top.append(info, controlWrap);
       row.append(top);
 
-      // 限制与风险提示（完全由后端能力与风险字段驱动，如实说明事后拦截边界）
+      // 精简提示：仅在存在事后拦截或可执行高风险范围时保留一行诚实说明
       const isPostObservation = tool.pre_execution_approval === false || tool.enforcement === "post_observation";
       const limitationText = typeof tool.limitation === "string" ? tool.limitation.trim() : "";
       if (isPostObservation && tool.risk === "network") {
         const noteText = currentVal === "allow"
-          ? "实验性提示：这是事后拦截，开启后搜索由 CLI 自动触发、不会逐次询问确认；搜索会计入本轮工具调用次数，超出后会尽量中止后续调用，已发出的请求无法撤回。关闭时也仅靠提示模型并在发现后中止，不能保证百分之百拦住。"
-          : "实验性限制：这是事后拦截，无法在搜索发出前拦住，发现时请求可能已经发出；关闭时靠提示模型不要搜索并在发现后中止本轮，不能保证百分之百拦住。开启后搜索会计入本轮工具调用次数，超出后会尽量中止后续调用。";
+          ? "事后拦截：自动触发并计入工具调用次数，超限尽量中止，已发出请求无法撤回。"
+          : "事后拦截：发现时请求可能已经发出，不能保证百分之百拦住；开启后计入工具调用次数。";
         row.append(el("div", "tool-risk-note", noteText));
       } else if (limitationText) {
         row.append(el("div", "tool-risk-note", limitationText));
       } else if (isPostObservation) {
-        row.append(el("div", "tool-risk-note", "实验性限制：此项为事后拦截，发现时操作可能已经执行，无法在执行前拦住。"));
+        row.append(el("div", "tool-risk-note", "事后拦截：发现时操作可能已执行，无法在执行前拦住。"));
       } else if (tool.risk === "high" && (editable || currentVal === "allow_once")) {
-        const warnText = currentVal === "allow_once"
-          ? "高风险警示：单次允许仅绑定当前轮 ACP 请求，并与宿主 MCP 共用调用次数上限；仍建议仅在受控工作区按需启用。"
-          : "高风险内置工具：默认拒绝；开启单次允许前请确认了解其访问范围。";
-        row.append(el("div", "tool-risk-note", warnText));
+        row.append(el("div", "tool-risk-note", "仅限隔离工作区顶层 .txt，单次授权与 MCP 共用调用次数上限。"));
       }
 
       ul.append(row);

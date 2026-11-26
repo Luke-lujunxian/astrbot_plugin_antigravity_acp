@@ -6,12 +6,23 @@ import sys
 import sqlite3
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from tests import astrbot_stub  # noqa: F401 -- install the offline host logger
 
-from agy_provider.admin_commands import admin_command, HELP, quota_text, usage_text
+from agy_provider.admin_commands import (
+    HELP,
+    admin_command,
+    doctor_text,
+    models_text,
+    quota_text,
+    setup_text,
+    status_text,
+    usage_text,
+    use_text,
+)
 from agy_provider.config import Settings
 from agy_provider.errors import AgyError
 from agy_provider.onboarding import next_step
@@ -39,14 +50,17 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         namespace = {
             "AstrMessageEvent": object, "admin_command": admin_command, "HELP": HELP,
             "sqlite3": sqlite3, "daily_snapshot": lambda days: {"days": [], "range": {"days": days}},
-            "quota_text": quota_text, "usage_text": usage_text, "PLUGIN_VERSION": "test",
+            "quota_text": quota_text, "usage_text": usage_text,
+            "doctor_text": doctor_text, "setup_text": setup_text,
+            "status_text": status_text, "models_text": models_text, "use_text": use_text,
+            "routing_snapshot": lambda _pm: {"resolution_reason": "configured_primary", "resolved_primary_id": "enabled"},
+            "PLUGIN_VERSION": "test",
             "AgyError": AgyError,
             "Settings": Settings,
             "next_step": next_step,
             "format_cost_report": format_cost_report,
             "instance_cost_snapshots": lambda: list(self.snapshots),
             "asyncio": asyncio,
-            "json": __import__("json"),
         }
         exec(
             compile(ast.Module(body=commands, type_ignores=[]), str(path), "exec"),
@@ -105,13 +119,89 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         for command in ("setup", "use", "cost", "doctor", "help", "models", "status", "quota", "usage"):
             self.assertIn("/agy " + command, help_text)
         self.assertIn("已加载 0", (await self.collect("status"))[0])
-        self.assertIn("disabled · gemini-test · 停用", (await self.collect("models"))[0])
+        models_out = (await self.collect("models"))[0]
+        self.assertIn("gemini-test [停用 · 跟随总闸]", models_out)
+        self.assertIn("/agy use disabled", models_out)
         self.assertIn("没有本地", (await self.collect("usage", "30"))[0])
         self.assertIn("用法", (await self.collect("usage", "31"))[0])
         quota = AsyncMock(return_value={"groups": [], "fetched_at": None, "error": {"message": "登录失效"}})
         self.plugin.setup_service.quota = types.SimpleNamespace(refresh=quota)
         self.assertIn("登录失效", (await self.collect("quota"))[0])
         quota.assert_awaited_once_with()
+
+    def test_quota_and_doctor_outputs_are_human_readable_and_free_of_raw_iso_or_json(self):
+        now = datetime(2026, 11, 26, 17, 47, 0, tzinfo=timezone(timedelta(hours=8)))
+        text = quota_text(
+            {
+                "fetched_at": "2026-11-26T09:37:12.315749+00:00",
+                "stale": False,
+                "error": None,
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {"window": "weekly", "remaining_fraction": 0.989, "reset_time": "2026-12-03T08:39:47+00:00"},
+                            {"window": "5h", "remaining_fraction": 1.0, "reset_time": None},
+                        ],
+                    }
+                ],
+            },
+            now=now,
+        )
+        self.assertNotIn("+00:00", text)
+        self.assertNotIn("T09:37", text)
+        self.assertIn("周额度 98.9%", text)
+        self.assertIn("5h额度 100%", text)
+        self.assertIn("重置 不适用", text)
+        self.assertIn("后 (", text)
+
+        doc = doctor_text(
+            {
+                "status": "passed",
+                "stage": "complete",
+                "cli_version": "1.5.18",
+                "model_count": 10,
+                "auth_bridge": True,
+                "proxy_mode": "inherit",
+                "verified_read": False,
+                "customizations_mode": "inherit",
+                "advertised_capabilities": {
+                    "mcpCapabilities": {"http": True, "sse": True},
+                    "promptCapabilities": {"image": True},
+                },
+                "routing": {
+                    "resolution_reason": "configured_primary",
+                    "configured_primary_id": "agy-main",
+                    "resolved_primary_id": "agy-main",
+                },
+            },
+            "环境与模型目录检查通过。",
+        )
+        self.assertNotIn("{", doc)
+        self.assertIn("AGY 自检通过（未发送对话）", doc)
+        self.assertIn("CLI：1.5.18 · 可用模型 10 个", doc)
+        self.assertIn("默认路由：agy-main（生效中）", doc)
+
+    async def test_doctor_command_uses_human_readable_summary(self):
+        async def job():
+            self.plugin.setup_service.report = {
+                "status": "passed",
+                "stage": "complete",
+                "cli_version": "1.5.18",
+                "model_count": 2,
+                "auth_bridge": True,
+                "proxy_mode": "inherit",
+                "verified_read": False,
+                "customizations_mode": "inherit",
+            }
+
+        self.plugin.setup_service.start_check = lambda: setattr(
+            self.plugin.setup_service, "job", asyncio.create_task(job())
+        )
+        out = (await self.collect("doctor"))[0]
+        self.assertNotIn("{", out)
+        self.assertIn("AGY 自检通过（未发送对话）", out)
+        self.assertIn("CLI：1.5.18 · 可用模型 2 个", out)
 
     async def test_usage_heatmap_keeps_unknown_days_separate(self):
         today = {"date": "2026-11-26", "requests": 2, "success": 1, "failed": 1, "input_tokens": 0,
@@ -120,6 +210,7 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.commands["daily_snapshot"] = lambda span: {"range": {"days": span, "end": today["date"]}, "days": days}
         text = (await self.collect("usage"))[0]
         self.assertIn("·0·?", text)
+        self.assertIn("11/26 · 2 轮", text)
 
     async def test_use_only_changes_target_session(self):
         result = await self.collect("use", "enabled")
@@ -127,6 +218,8 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
             "enabled", "chat_completion", "target-session"
         )
         self.assertIn("已切换", result[0])
+        self.assertIn("纯聊天", result[0])
+        self.assertNotIn("agy_tools_mode=", result[0])
 
     async def test_disabled_non_agy_and_unknown_provider_denied(self):
         for provider_id in ("disabled", "other-provider", "", "unknown"):
@@ -179,11 +272,15 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         output = (await self.collect("cost"))[0]
         self.assertIn("只读，未发送模型请求", output)
         self.assertIn("agy_chat", output)
-        self.assertIn("reuse=strict", output)
+        self.assertIn("复用 strict", output)
         self.assertIn("50.0%", output)
+        self.assertIn("冷启动", output)
+        self.assertNotIn("input_other=", output)
 
     async def test_setup_explains_native_entry_without_login_material(self):
         result = (await self.collect("setup"))[0]
         self.assertIn("首次设置", result)
         self.assertIn("enabled", result)
+        self.assertIn("纯聊天", result)
+        self.assertNotIn("mode=chat", result)
         self.assertNotIn("accounts.google.com", result)

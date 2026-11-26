@@ -1,7 +1,6 @@
 """Register only while the plugin is enabled; own no global CLI credentials."""
 
 import asyncio
-import json
 import sqlite3
 from copy import deepcopy
 
@@ -11,7 +10,17 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.provider import register as registry
 
 from .agy_provider._version import PLUGIN_VERSION
-from .agy_provider.admin_commands import HELP, admin_command, quota_text, usage_text
+from .agy_provider.admin_commands import (
+    HELP,
+    admin_command,
+    doctor_text,
+    models_text,
+    quota_text,
+    setup_text,
+    status_text,
+    usage_text,
+    use_text,
+)
 from .agy_provider.config import Settings
 from .agy_provider.errors import AgyError
 from .agy_provider.host_compat import install_host_compat, uninstall_host_compat
@@ -98,15 +107,7 @@ class AgyProviderPlugin(Star):
             return
         service = self.setup_service
         busy = service.busy or service.login.busy
-        message = "AGY 首次设置\n打开 AstrBot WebUI → 插件 → Antigravity ACP → 首次设置。\n"
-        message += "检测或登录正在进行。" if busy else next_step(service.report)
-        if rows := service.providers():
-            message += "\n已配置模型：\n" + "\n".join(
-                f"{row['id']} · {row['model']} · mode={row.get('tools_mode', 'inherit')}"
-                for row in rows
-            )
-            message += "\n在本会话使用：/agy use <提供商 ID>（建议纯聊天优先用 chat 实例，工具会话用 tools 实例；统计：/agy cost）"
-        yield event.plain_result(message)
+        yield event.plain_result(setup_text(busy, next_step(service.report), service.providers()))
 
     @agy.command("use")
     @admin_command
@@ -117,21 +118,15 @@ class AgyProviderPlugin(Star):
             return
         try:
             service._available()
-            allowed = {row["id"] for row in service.providers() if row["enabled"]}
+            allowed = {row["id"]: row for row in service.providers() if row["enabled"]}
             if provider_id not in allowed:
-                raise AgyError("CONFIG", "请先在首次设置页保存模型，再使用 /agy use <提供商 ID>。")
+                raise AgyError("CONFIG", "请指定已启用的模型实例 ID（可用 /agy models 查看）。")
             from astrbot.core.provider.entities import ProviderType
 
             await self.context.provider_manager.set_provider(
                 provider_id, ProviderType.CHAT_COMPLETION, event.unified_msg_origin
             )
-            chosen = next(
-                (row for row in service.providers() if row["id"] == provider_id), {}
-            )
-            mode = chosen.get("tools_mode", "inherit")
-            yield event.plain_result(
-                f"当前会话已切换到 {provider_id}（agy_tools_mode={mode}），可以开始聊天。"
-            )
+            yield event.plain_result(use_text(provider_id, allowed[provider_id]))
         except AgyError as exc:
             yield event.plain_result(str(exc))
         except Exception:
@@ -187,11 +182,7 @@ class AgyProviderPlugin(Star):
                 report["routing"] = routing_snapshot(self.context.provider_manager)
             finally:
                 self.doctor_task = None
-        yield event.plain_result(
-            "AGY 无生成自检（不会发送模型提示）：\n"
-            + json.dumps(report, ensure_ascii=False, indent=2)
-            + "\n" + next_step(report)
-        )
+        yield event.plain_result(doctor_text(report, next_step(report)))
 
     @agy.command("help")
     @admin_command
@@ -221,12 +212,7 @@ class AgyProviderPlugin(Star):
         if self.stopping or self.setup_service is None:
             yield event.plain_result("AGY 插件尚未就绪。")
             return
-        rows = instance_cost_snapshots()
-        lines = [f"AGY {PLUGIN_VERSION} · 已加载 {len(rows)} 个实例"]
-        for row in rows:
-            pool = row["pool"]
-            lines.append(f"{row['provider_id']} · {row['model']} · {pool['active_sessions']} 会话 / {pool['live_processes']} 进程")
-        yield event.plain_result("\n".join(lines))
+        yield event.plain_result(status_text(PLUGIN_VERSION, instance_cost_snapshots()))
 
     @agy.command("models")
     @admin_command
@@ -234,9 +220,7 @@ class AgyProviderPlugin(Star):
         if self.stopping or self.setup_service is None:
             yield event.plain_result("AGY 插件尚未就绪。")
             return
-        rows = self.setup_service.providers()
-        lines = [f"{row['id']} · {row['model']} · {'启用' if row['enabled'] else '停用'}" for row in rows]
-        yield event.plain_result("\n".join(lines) or "尚未配置模型，请运行 /agy setup。")
+        yield event.plain_result(models_text(self.setup_service.providers()))
 
     @agy.command("usage")
     @admin_command

@@ -1330,6 +1330,11 @@ h2 {
   background: var(--surface-subtle);
 }
 
+.tool-row[data-readonly="true"] {
+  padding: 10px 14px;
+  gap: 4px;
+}
+
 .tool-row[data-reload-pending="true"] {
   border-color: color-mix(in srgb, var(--paused) 45%, var(--border));
 }

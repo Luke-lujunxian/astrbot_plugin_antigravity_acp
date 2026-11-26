@@ -595,7 +595,10 @@ class FailureEventsAndReadOnlyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(replies), 1)
         doctor_text = replies[0]
-        self.assertIn('"routing"', doctor_text)
+        self.assertNotIn("{", doctor_text)
+        self.assertIn("默认路由", doctor_text)
+        self.assertIn("missing-id", doctor_text)
+        self.assertIn("acp-1", doctor_text)
         self.assertNotIn('"models"', doctor_text)
         self.assertNotIn('"efforts"', doctor_text)
         self.assertNotIn('"selected_model"', doctor_text)

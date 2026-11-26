@@ -852,6 +852,31 @@ test("tool policy renders dynamic backend tools, hides switches for unverified/u
   assert.ok(allTexts.includes("未生效（总闸关闭）"));
 });
 
+test("tool policy page stays concise without redundant per-row descriptions or duplicate readonly labels", async () => {
+  const data = base();
+  data.tool_policy = {
+    enable_tools: true,
+    reload_required: false,
+    tools: [
+      {id: "astrbot_mcp", source: "mcp", purpose: "宿主提供的工具", risk: "host", capability: "supported", choices: [], policy: "allow_once", effective: true, reload_required: false},
+      {id: "read_file", source: "builtin", purpose: "读取隔离工作区顶层文本文件", risk: "high", capability: "unverified", choices: ["deny"], policy: "deny", effective: false, reload_required: false},
+      {id: "run_command", source: "builtin", purpose: "执行终端命令", risk: "high", capability: "unsupported", choices: ["deny"], policy: "deny", effective: false, reload_required: false},
+    ],
+  };
+  const ui = await boot(data);
+  ui.get("tab-btn-tools").onclick();
+
+  assert.doesNotMatch(html, /单个模型是否启用工具在/);
+  const listNodes = collectNodes(ui.get("tool-policy-list"));
+  assert.equal(listNodes.some(n => n.tag === "p"), false);
+  const allTexts = listNodes.map(n => n.textContent).filter(Boolean);
+  assert.ok(allTexts.includes("宿主管控"));
+  assert.ok(allTexts.includes("已拒绝"));
+  for (const noisy of ["拒绝（只读）", "单次允许（宿主管控）", "未生效", "高风险", "当前版本或安全边界不支持此工具"]) {
+    assert.equal(allTexts.some(t => t.includes(noisy)), false, `Unexpected noisy text: ${noisy}`);
+  }
+});
+
 test("quota panel handles unqueried, loading, populated, null reset/fraction, stale, unsupported, and all 7 sanitized error codes", async () => {
   const unqueried = {
     schema_version: 1, source: "official_cli", login_env: "env-a", cli_version: "1.5.17",
