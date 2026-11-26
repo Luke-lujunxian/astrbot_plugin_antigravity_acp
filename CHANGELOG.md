@@ -1,5 +1,11 @@
 # 变更记录
 
+## 0.8.5（2026-11-26）
+
+- **账号额度自动刷新（#43 / [PR #44](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/44)）**：首次进入监控页、页面恢复及登录结束后先读取缓存，缺失或过期才通过官方 CLI 查询；60 秒成功缓存、并发合并、失败冷却与原手动强制刷新并存，GET 无副作用，无常驻额度轮询。
+- **近 24 小时监控明细跨重载恢复**：新增独立 `turn-history-v1.sqlite3` 与持久匿名实例关联，保存每实例最多 100 轮、全库最多 2,000 轮脱敏统计，主库上限 8 MiB；恢复耗时、请求计数、Token 与复用率，不重复累计既有每日用量或失败事件。存储异常降级为内存统计；ACP 会话池、当前上下文及进程状态仍来自本次运行时，不保存对话正文、凭据或工具参数。
+- **验证与限制**：PR #44 [CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45840247494) 四组 Ubuntu/Windows × Python 3.11/3.12 回归通过；PR 报告记录 Node 45 项通过、Linux Docker / AstrBot 4.29.4 / CLI 1.5.18 真实额度查询、并发缓存、运行时重建与独立进程恢复验证。管理员 iframe 交互及带生产历史样本的宿主整进程重启仍待验收。旧版未落盘明细不可回填；可回退至 v0.8.4 并保留宿主配置与统计文件。
+
 ## 0.8.4（2026-11-26）
 
 - **内置工具独立权限与实验性搜索（#38 / [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)）**：新增独立「工具权限」页签与 `POST setup/tool-policy` 接口，支持单独持久化 `builtin_read_file` 与实验性 `builtin_search_web` 而不覆盖既有提供商配置，展示未生效总闸告警与待重载琥珀色徽标并折叠收纳固定拒绝项；`search_web` 关闭时经模型护栏与事后观察中止，开启后按通知计入与 MCP 共用的 `tool_max_calls` 预算，面板与聊天提示均如实说明事后观测局限。

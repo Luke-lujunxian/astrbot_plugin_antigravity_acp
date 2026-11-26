@@ -36,37 +36,38 @@ jobs:
       - name: Setup view interaction regressions
         run: node --test tests/setup.test.mjs
 
-  release_v084:
+  release_v085:
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.4 tool policy, quota, usage & readonly builtins'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.5 quota auto-refresh & persistent monitoring'
     needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Package and publish v0.8.4
+      - name: Package and publish v0.8.5
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          grep -Fx 'version: 0.8.4' metadata.yaml
-          grep -Fx 'PLUGIN_VERSION = "0.8.4"' agy_provider/_version.py
-          asset=astrbot_plugin_antigravity_acp_v0.8.4.zip
+          grep -Fx 'version: 0.8.5' metadata.yaml
+          grep -Fx 'PLUGIN_VERSION = "0.8.5"' agy_provider/_version.py
+          asset=astrbot_plugin_antigravity_acp_v0.8.5.zip
           git archive --format=zip --prefix=astrbot_plugin_antigravity_acp/ -o "$asset" "$GITHUB_SHA"
           unzip -t "$asset"
           for f in index.html app.js style.css; do unzip -Z1 "$asset" | grep -Fx "astrbot_plugin_antigravity_acp/views/setup/$f"; done
           if unzip -Z1 "$asset" | grep -E '/views/setup/assets/|/frontend/|/tests/|/docs/'; then exit 1; fi
-          cat > /tmp/v084-notes.md <<'NOTES'
-          ## v0.8.4 — 工具权限、CLI 额度、每日用量与 1.5.18 只读内置工具适配（#38 / #41）
-
-          - 新增 WebUI「工具权限」独立页签（`setup/tool-policy`）、官方 CLI 账号额度查询（`setup/quota-refresh` / `monitor/quota`）与本地每日用量热力图（`monitor/daily/*`），精简权限页说明、汉化额度标签并增加未就绪引导条。
-          - 重构 `/agy help|setup|use|quota|usage|cost|doctor|status|models` 私聊输出为简洁中文可读文本，时间转为宿主机本地格式并修复非管理员权限边界。
-          - 完成官方 CLI `1.5.18`（ACP）实测调研：新增统一内置工具注册表并覆盖 `edit_file` 与 1.5.18 调度/子代理工具拒止；开放 `read_file` 至 Linux CLI `1.5.17`/`1.5.18`（含 `StartLine`/`EndLine`/`ByteOffset` 校验，禁止 `file:///` URI）；解除对宿主 MCP 非空的依赖并修复非搜索内置工具误报联网搜索提示。
-
-          完整改动见 [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)、[PR #42](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/42)、[Issue #38](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/38)、[Issue #41](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/41) 和 [CHANGELOG](https://github.com/sl251/astrbot_plugin_antigravity_acp/blob/v0.8.4/CHANGELOG.md)。
-          Windows / Ubuntu CI 与 `xiaoyu`（CLI `1.5.18`）实机冒烟通过后发布；支持 AstrBot `>=4.29.4,<4.30`、Python 3.11+。可回退至 `v0.8.3`。
+          cat > /tmp/v085-notes.md <<'NOTES'
+          ## v0.8.5 — 额度按需自动刷新与监控明细跨重载恢复（#43 / #44）
+          
+          - 打开或恢复监控页时先读额度缓存，缺失或过期才调用官方 CLI /usage；复用 60 秒 TTL、并发合并与失败冷却，保留手动刷新，不增加常驻额度轮询。
+          - 新增独立 SQLite 明细库，恢复近 24 小时每实例最多 100 轮的脱敏请求、耗时、Token 与会话复用统计；全库最多 2,000 轮，主库上限 8 MiB。存储异常降级为内存统计，不重复累计每日用量或失败日志。
+          - ACP 会话池、当前上下文及进程状态仍反映当前运行时；不保存原始对话、凭据或工具参数。旧版本未落盘的明细不回填。
+          
+          [Issue #43](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/43) · [PR #44](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/44) · [PR CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45840247494)
+          
+          PR #44 的 Ubuntu/Windows × Python 3.11/3.12 CI 全部通过；报告记录 Node 45 项通过及 Linux Docker / AstrBot 4.29.4 / CLI 1.5.18 额度查询、并发复用、运行时重建和独立进程恢复实测。管理员 iframe 交互及带生产历史样本的宿主整进程重启仍待验收。支持 AstrBot >=4.29.4,<4.30、Python 3.11+；可回退 v0.8.4，保留统计文件与宿主配置。
           NOTES
-          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v084-notes.md
-          gh release create v0.8.4 "$asset" --target "$GITHUB_SHA" --title "v0.8.4" --notes-file /tmp/v084-notes.md --latest
+          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v085-notes.md
+          gh release create v0.8.5 "$asset" --target "$GITHUB_SHA" --title "v0.8.5" --notes-file /tmp/v085-notes.md --latest
