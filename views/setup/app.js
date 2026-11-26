@@ -1903,7 +1903,7 @@ function renderToolPolicy() {
       } else if (isPostObservation) {
         row.append(el("div", "tool-risk-note", "事后拦截：发现时操作可能已执行，无法在执行前拦住。"));
       } else if (tool.risk === "high" && (editable || currentVal === "allow_once")) {
-        row.append(el("div", "tool-risk-note", "仅限隔离工作区顶层 .txt，单次授权与 MCP 共用调用次数上限。"));
+        row.append(el("div", "tool-risk-note", "仅限隔离工作区顶层 .txt，支持按行读取与无 MCP 独立启用，与 MCP 共用调用次数上限。"));
       }
 
       if (isLockedDeny && tool.capability === "unsupported") {

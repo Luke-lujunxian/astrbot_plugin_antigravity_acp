@@ -17,7 +17,13 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .builtin_tools import BUILTINS, SEARCH_ABORTED_NOTICE, BuiltinDenied, read_target
+from .builtin_tools import (
+    SEARCH_ABORTED_NOTICE,
+    BuiltinDenied,
+    is_known_builtin,
+    read_args_digest,
+    read_target,
+)
 from .config import Settings
 from .bridge_transport import BridgeTransport, TOKEN_ENV
 from .errors import AgyError
@@ -373,6 +379,7 @@ class ToolBroker:
         self.notifications = {}
         self.read_workspace = None
         self.read_calls = {}
+        self.read_args = {}
         self.read_decisions = {}
         self.search_calls = {}
         self.search_seen = set()
@@ -623,11 +630,17 @@ class ToolBroker:
         if status == "completed" and not self.read_decisions.get(ident):
             raise BuiltinDenied()
         target = read_target(update, self.read_workspace)
+        args_key = read_args_digest(update.get("rawInput"))
         if previous and not any(k in update for k in ("rawInput", "args", "locations")):
             target = previous[0]
+            args_key = self.read_args.get(ident)
         if target is None or (previous and previous[0] != target):
             raise BuiltinDenied()
+        if previous and ident in self.read_args and args_key != self.read_args[ident]:
+            raise BuiltinDenied()
         self.read_calls[ident] = (target, status)
+        if args_key is not None:
+            self.read_args[ident] = args_key
 
     def observe_search(self, update, ident):
         if (not self.turn_active or self.closed or not self.settings.enable_tools
@@ -678,7 +691,7 @@ class ToolBroker:
         if ident in self.read_calls or raw_name == "read_file":
             self.observe_read(update, ident, raw_name)
             return
-        if isinstance(raw_name, str) and raw_name in BUILTINS:
+        if is_known_builtin(raw_name):
             raise BuiltinDenied()
         name = self.snapshot.notification_name(raw_name)
         previous = self.notifications.get(ident)

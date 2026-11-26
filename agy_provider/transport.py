@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._version import PLUGIN_VERSION
-from .builtin_tools import BUILTINS, SEARCH_ABORTED_NOTICE, BuiltinDenied, read_target, supports_read
+from .builtin_tools import (
+    BuiltinDenied,
+    builtin_notice,
+    is_known_builtin,
+    read_args_digest,
+    read_target,
+    supports_read,
+)
 from .config import Settings
 from .context_usage import ContextUsage
 from .errors import AgyError, classified_error, remote_error
@@ -443,10 +450,12 @@ class AcpClient:
             return None
         if call.get("name") == "read_file":
             observed = broker.read_calls.get(ident)
+            args_key = read_args_digest(call.get("rawInput"))
             if (not self.verified_read or not observed or observed[1] != "pending"
                     or call.get("status") != "pending"
                     or not broker.settings.enable_tools or broker.settings.builtin_read_file != "allow_once"
                     or read_target(call, broker.read_workspace) != observed[0]
+                    or (ident in broker.read_args and args_key != broker.read_args[ident])
                     or ident in broker.read_decisions or broker.read_ledger_full
                     or broker.count >= broker.settings.tool_max_calls):
                 return None
@@ -589,8 +598,10 @@ class AcpClient:
             if self.tool_broker is not None:
                 self.tool_broker.observe(update)
                 return
-            if isinstance(update.get("name"), str) and update["name"] in BUILTINS:
-                raise BuiltinDenied("TOOLS_DISABLED", SEARCH_ABORTED_NOTICE, user_notice=SEARCH_ABORTED_NOTICE)
+            raw_name = update.get("name")
+            if is_known_builtin(raw_name):
+                notice = builtin_notice(raw_name)
+                raise BuiltinDenied("TOOLS_DISABLED", notice, user_notice=notice)
             raise AgyError(
                 "TOOLS_DISABLED",
                 "AGY 尝试调用内置工具；已中止该轮，请检查 CLI 对无工具 agent 的支持。",

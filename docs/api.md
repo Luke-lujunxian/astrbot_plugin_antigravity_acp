@@ -34,11 +34,11 @@ GET `setup/status` 包含 `tool_policy`。POST `setup/tool-policy` 请求含 `cs
 ]}
 ```
 
-`policy` 为已保存策略，`effective` 表示当前加载的全局策略在具备所需条件的工具实例是否可用。`enable_tools` 取当前生效值。两项内置工具仅适用于现有的工具模式，要求总闸开启且本轮含非空宿主工具快照。实例 `chat`、宿主禁用 `tool_use` 或本轮 `tool_choice=none` 时均不可用。MCP 清单由每轮宿主快照决定。
+`policy` 为已保存策略，`effective` 表示当前加载的全局策略在具备所需条件的工具实例是否可用。`enable_tools` 取当前生效值。两项可开启的内置工具仅适用于工具实例（非 `chat` 且本轮 `tool_choice != "none"`），要求总闸开启；开启后即使本轮没有宿主 MCP 工具也可独立激活（无需等待非空宿主工具快照）。实例 `chat` 或本轮 `tool_choice=none` 时均不可用。MCP 清单由每轮宿主快照决定。
 
-`read_file` 仅在 Linux、CLI 版本探测及当前 ACP 握手均确认 1.5.17、`strict` 下开放，仅限当前私有工作区顶层普通单链接 `.txt` 文件。未确认时 `capability=unverified`、`choices=["deny"]`。每次授权绑定当前 prompt 的 ACP 请求并与 MCP 共用 `tool_max_calls`。
+`read_file` 仅在 Linux、CLI 版本探测及当前 ACP 握手均确认 `1.5.17` 或 `1.5.18`、`strict` 下开放，仅限当前私有工作区顶层普通单链接 `.txt` 文件，支持合法只读分页参数 `StartLine`、`EndLine`、`ByteOffset`（禁止 `file:///` URI 及参数篡改）。未确认时 `capability=unverified`、`choices=["deny"]`。每次授权绑定当前 prompt 的 ACP 请求并与 MCP 共用 `tool_max_calls`。
 
-`search_web` 是由官方 CLI 自动执行的实验性联网搜索。关闭时模型护栏要求避免该工具，插件在收到调用通知时中止本轮，搜索请求可能已经发出。开启时每个新搜索调用在收到通知后计入本轮工具调用次数，并与 MCP 和 `read_file` 共用 `tool_max_calls`。检测到超预算的搜索后中止本轮，已发出的请求无法撤回，预算无法保证实际联网次数。`pre_execution_approval: false`、`enforcement: "post_observation"` 和 `limitation` 说明上述限制。`run_command`、`write_file`、`browser`、`read_url`、`execute_url` 继续固定为只读 `deny`。
+`search_web` 是由官方 CLI 自动执行的实验性联网搜索。关闭时模型护栏要求避免该工具，插件在收到调用通知时中止本轮，搜索请求可能已经发出。开启时每个新搜索调用在收到通知后计入本轮工具调用次数，并与 MCP 和 `read_file` 共用 `tool_max_calls`。检测到超预算的搜索后中止本轮，已发出的请求无法撤回，预算无法保证实际联网次数。`pre_execution_approval: false`、`enforcement: "post_observation"` 和 `limitation` 说明上述限制。`edit_file`、`write_file`、`run_command`、`read_url`、`execute_url`、`browser` 及 CLI 内部调度/子代理/工作流工具继续固定拒绝（详情见 [CLI 1.5.18 原生工具调查报告](issue41-builtin-tools-probe.md)）。
 
 保存请求只更新所提交的全局 `builtin_read_file`、`builtin_search_web` 键，两项默认 `deny`。工具行的 `reload_required` 表示该行已保存策略与运行态不同，任一工具行待重载即令顶层 `reload_required: true`。重载后使用新策略和护栏。持久化失败会回滚本次提交并返回 HTTP 500。仅提交 `csrf`、未知字段、工具或策略返回 HTTP 400 `CONFIG`。未验证时提交 `read_file: "allow_once"` 返回 HTTP 400 `UNSUPPORTED`。总闸由宿主插件配置保存并重载，实例模式由原有 `setup/provider-update` 更新。
 

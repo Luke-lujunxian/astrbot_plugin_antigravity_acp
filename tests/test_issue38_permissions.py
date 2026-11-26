@@ -124,11 +124,14 @@ class ReadPermissionTests(unittest.IsolatedAsyncioTestCase):
         os.link(self.file, self.workspace / "alias")
         with self.assertRaises(BuiltinDenied):
             self.observe()
-        for name in ("search_web", "run_command", "write_file", "browser", "execute_url", "read_url"):
+        for name in ("search_web", "run_command", "edit_file", "write_file", "browser",
+                     "execute_url", "read_url", "schedule", "invoke_subagent"):
             with self.assertRaises(BuiltinDenied):
                 self.broker.observe({"toolCallId": "x", "name": name})
-        self.assertFalse(supports_read("1.5.18"))
+        self.assertTrue(supports_read("1.5.18"))
         self.assertTrue(supports_read("agy 1.5.17"))
+        self.assertFalse(supports_read("1.5.16"))
+        self.assertFalse(supports_read("1.5.19"))
         self.assertEqual(self.broker.count, 0)
 
 

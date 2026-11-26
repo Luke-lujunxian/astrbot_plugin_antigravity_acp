@@ -167,23 +167,23 @@
     "hint": "合法整数范围 4096–8388608；非法数值在加载时恢复为默认值并告警。"
   },
   "builtin_read_file": {
-    "description": "隔离工作区文本读取权限（需工具总闸、已验证 CLI，重载生效）",
+    "description": "隔离工作区顶层 .txt 只读授权（需工具总闸及已验证 Linux CLI 1.5.17/1.5.18，支持按行读取，可无 MCP 独立启用，重载生效）",
     "type": "string",
     "options": ["deny", "allow_once"],
     "default": "deny"
   },
   "builtin_search_web": {
-    "description": "CLI 联网搜索（实验性，需工具总闸，重载生效）",
+    "description": "CLI 联网搜索（实验性，需工具总闸，可无 MCP 独立启用，重载生效）",
     "type": "string",
     "options": ["deny", "allow"],
     "default": "deny",
     "hint": "CLI 自动执行搜索，无法在执行前审批。关闭后通过模型护栏和事后中止限制；发现时搜索请求可能已发出。"
   },
   "enable_tools": {
-    "description": "启用宿主工具桥（需完整工具 schema 与宿主会话）",
+    "description": "启用工具总闸（宿主 MCP 工具桥与已授权 CLI 原生只读/搜索工具）",
     "type": "bool",
     "default": false,
-    "hint": "总闸；非空工具集启用默认 agent。POSIX 使用私有 Unix socket，Windows 使用仅绑定 127.0.0.1 的每会话认证桥；执行/审批仍交宿主，跨平台端到端验收待完成。"
+    "hint": "总闸；非空宿主 MCP 或已启用的原生内置工具会启用默认 agent（纯内置模式不启动多余 MCP 子进程）。POSIX 使用私有 Unix socket，Windows 使用仅绑定 127.0.0.1 的每会话认证桥；宿主工具执行/审批仍交宿主。"
   },
   "session_reuse_mode": {
     "description": "会话复用模式",
