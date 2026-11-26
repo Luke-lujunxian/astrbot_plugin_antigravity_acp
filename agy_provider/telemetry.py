@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from astrbot.api import logger
 
+from .daily_usage import DailyUsage
 from .failure_events import FailureJournal, STOP_REASONS, event_fields, MAX_BYTES, MAX_EVENTS, TTL
 
 MAX_HISTORY_TURNS = 100
@@ -71,21 +72,32 @@ IMAGE_TIMEOUT IMAGE_URL IMAGES_DISABLED HOST ROUTE_MISMATCH REFERENCE_BLOCKED
 
 
 _journal = None
+_daily = None
 _last_service = (None, None)
 
 
 def start_diagnostics(root):
-    global _journal, _last_service
+    global _journal, _daily, _last_service
     stop_diagnostics()
     _last_service = (None, None)
     _journal = FailureJournal(root, MONITOR_ERROR_CODES)
+    _daily = DailyUsage(root)
 
 
 def stop_diagnostics():
-    global _journal
+    global _journal, _daily
+    if _daily is not None:
+        _daily.close()
+        _daily = None
     if _journal is not None:
         _journal.close()
         _journal = None
+
+
+def daily_snapshot(days=90):
+    if _daily is None:
+        raise OSError("每日统计尚未就绪。")
+    return _daily.snapshot(days)
 
 
 def provider_tag(provider_id):
@@ -247,6 +259,8 @@ class TurnMeter:
         self.tool_schema_bytes: int = max(0, int(tool_schema_bytes))
         self.omitted_messages: int = 0
         self.estimate_method: str = estimate_method
+        self.no_fallback = False
+        self.builtin_used = False
         self.tool_calls: int = 0
         self.request_sent: bool = False
         self.rpc_stage = "idle"
@@ -298,7 +312,7 @@ class TurnMeter:
 
     @property
     def replay_blocked(self):
-        return self.body_seen or self.tool_handed_off or self.tool_result_supplied
+        return self.body_seen or self.tool_handed_off or self.tool_result_supplied or self.builtin_used
 
     def observe_output(self, *, has_output: bool) -> None:
         """Record whether this turn produced any body text, thought, or tool call."""
@@ -336,6 +350,10 @@ class TurnMeter:
 
     def record_tool_call(self) -> None:
         self.tool_calls += 1
+
+    def record_builtin_call(self):
+        self.builtin_used = True
+        self.record_tool_call()
 
     def observe_usage(self, result: dict, *, source: str) -> None:
         buckets, cache_present = extract_acp_usage(result)
@@ -378,12 +396,16 @@ class TurnMeter:
 
         fallback_reason = None
         if status in {"error", "short_circuited"}:
-            if self.tool_handed_off:
+            if self.builtin_used:
+                fallback_reason = "builtin_grant"
+            elif self.tool_handed_off:
                 fallback_reason = "tool_handoff"
             elif self.tool_result_supplied:
                 fallback_reason = "tool_continuation"
             elif self.body_seen:
                 fallback_reason = "visible_prefix"
+            elif self.no_fallback:
+                fallback_reason = "policy_denial"
             else:
                 fallback_reason = "no_visible_prefix"
         record = {
@@ -512,6 +534,8 @@ class TelemetryTracker:
     def record_turn(self, record: dict) -> None:
         self._prune_history()
         record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+        if _daily is not None:
+            _daily.record(record)
         global _last_service
         if record.get("status") == "ok" and record.get("request_sent") and record.get("provider"):
             _last_service = (safe_label(record["provider"]), record["recorded_at"])

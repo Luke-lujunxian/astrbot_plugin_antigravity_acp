@@ -106,6 +106,8 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 - **只读诊断与统计指令**：
   - `/agy doctor`：进行无损连通性与会话自检。
   - `/agy cost`：查看各实例只读缓存复用、近 24 小时 Token 统计与进程池摘要（不发任何模型请求）。
+  - `/agy quota` 手动查询官方 CLI 账号额度，`/agy usage [30|90|365]` 查看本地每日用量，`/agy help` 列出全部指令。
+  - QQ 私聊中 `/new` 正常、`/agy cost` 被当成聊天时，请在该会话实际使用的 AstrBot 配置「可用插件」中勾选 `astrbot_plugin_antigravity_acp` 并保存，再发 `/agy help`。
 - **同一会话连续出现 `history_rewrite`**：升级至含 #33 修复的 v0.8.2 后，在同一会话连续发送消息，检查后续轮是否显示 `reused=true`。真实历史编辑等情况仍会触发重建。详情见 [会话复用排障](docs/troubleshooting.md#会话复用与历史重写)。
 
 ---
@@ -135,7 +137,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 | 当前契约 | 详细说明与证据入口 |
 | --- | --- |
 | 模型请求只走官方 `agy acp` stdio；每会话隔离目录，认证由官方 CLI 管理，不读取或记录凭据内容 | [架构与认证](docs/architecture.md)，[启动/登录排障](docs/troubleshooting.md#启动登录与模型设置) |
-| CLI 内置文件、终端、web search/browser 继续拒绝；只有当前活跃 prompt 中已观测且匹配的快照 MCP 调用可获唯一 `allow_once`，宿主审批/校验/预算仍有效 | [MCP 权限与 schema](docs/architecture.md#mcp-的两层权限与两份-schema)，[#12 排障](docs/troubleshooting.md#empty权限拒绝与-12) |
+| 内置工具默认拒绝。Linux + CLI 1.5.17 可单独启用隔离工作区文本读取，与 MCP 共用次数预算。搜索、终端、浏览器和文件写入不开放 | [MCP 权限与 schema](docs/architecture.md#mcp-的两层权限与两份-schema)，[#12 排障](docs/troubleshooting.md#empty权限拒绝与-12) |
 | 模型 schema 适配（含 `anyOf`/联合类型数组）与宿主原始契约独立；执行按原始 schema 校验，两者均参与工具指纹 | [#13 参数排障](docs/troubleshooting.md#tool_arguments-与-13) |
 | 默认严格会话复用；活跃工具轮等待回填期间同会话并发新请求按 `queue_timeout` 排队隔离；已输出可见正文、交接工具或进入工具续轮后失败禁止重试/fallback；仅思考/进度且未交接的失败可保留显式 fallback 资格 | [会话与防重放](docs/architecture.md#会话历史与防重放) |
 | system 仅过滤已知宿主能力声明并定点兼容改写已知 Safe Mode 单句；4.30 文案处理不是 4.30 宿主兼容证明；`content_429_candidate` 是候选遥测，不是上游根因 | [过滤与 429 边界](docs/architecture.md#system-过滤与-429-的证据边界)，[#14 / #19 排障](docs/troubleshooting.md#rate_limit--quota-与-14) |

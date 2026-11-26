@@ -29,7 +29,7 @@ flowchart LR
 
 | 模块 | 当前职责 |
 | --- | --- |
-| [main.py](../main.py) | 生命周期、配置注入、管理员 `/agy setup`、`doctor`、`use`、`cost`，设置页与监控注册 |
+| [main.py](../main.py) | 生命周期、配置注入、[管理员指令](api.md#聊天管理员指令)，设置页与监控注册 |
 | [provider.py](../agy_provider/provider.py) | 注册 `agy_acp`、Provider 请求/流式响应、模型/档位与工具模式、FailureGuard 接入、防重放标记 |
 | [messages.py](../agy_provider/messages.py)、[media.py](../agy_provider/media.py) | 消息规范化、稳定 system/可信 transient、历史预算，图片格式/目录/SSRF 校验 |
 | [system_prompt.py](../agy_provider/system_prompt.py) | `filter_host_capabilities()`，精确过滤失实宿主能力声明，独立定点改写已知 Safe Mode 单句，不修改用户历史 |
@@ -57,7 +57,7 @@ flowchart LR
 
 ## MCP 的两层权限与两份 schema
 
-`transport.AcpClient._mcp_permission_option()` 只放行同时满足以下条件的请求：
+`transport.AcpClient._permission_option()` 对 MCP 放行须同时满足以下条件：
 
 1. 同一活跃、未终止、未超时的 ACP prompt，broker 未关闭且处于工具轮。
 2. 严格 `mcp_astrbot_<wire_name>` 能映射到当前快照；同调用 ID 已被观测到，名称及 `pending/in_progress` 状态匹配。
@@ -65,7 +65,9 @@ flowchart LR
 
 授权在写回复前登记，终态帧到达立即关闭窗口；其他 permission 返回 `cancelled`，其他未实现的客户端能力请求返回 JSON-RPC `-32601`。拒绝证据仅属于当前 prompt，最多 128 条，只含有界 method、名称和 ID，不含 arguments。
 
-内置工具拒绝后，CLI 仍可能不把拒绝结果回喂模型就结束本轮。`TOOL_PERMISSION` 是插件侧归因，守卫提示仅减少误用；二者不代表该上游行为已修复，也不能根据合法 MCP 的选项推断尚未捕获的内置工具选项。
+内置工具默认拒绝。工具实例使用 strict。Linux CLI 1.5.17 的 read_file 可单独配置为 allow_once；进程版本、当前 ACP 握手、活跃调用和实际权限帧均须匹配。读取范围限同用户私有工作区顶层、同属主、无组/其他写权限的普通单链接 .txt 文件。插件只检查元数据，CLI 执行读取。回复权限前扣除单轮工具预算并登记决定。搜索自动批准，通知可能晚于联网，不能据此开放。已识别的内置工具被拒且尚无正文、工具交接或执行时，Provider 可返回本地说明，允许用户继续下一轮。原轮保留失败遥测并退休，不自动追加模型请求。
+
+每日统计将终结轮按宿主本地日期及模型写入插件数据目录的 daily-usage-v1.sqlite3。额度由独立的官方 CLI /usage 按需查询。接口、缓存和未观测用量的表达方式见[后端契约](api.md)。
 
 放行后 `ToolBroker.dispatch()` 继续检查活跃轮、会话元数据、工具名称、参数、次数/并发/结果预算；`ToolTurn` 交给 AstrBot 审批和执行，按审计过的调用及参数匹配回填。不能因 ACP 已许可就跳过宿主约束。
 
@@ -118,7 +120,7 @@ flowchart LR
 | 故障或任务 | 入口源码/符号 | 对应测试 |
 | --- | --- | --- |
 | #24 历史图片被重复提取为当前附件 | [messages.py](../agy_provider/messages.py) `prompt_blocks` / `build_window` | [test_prompt_images.py](../tests/test_prompt_images.py)、[test_sessions.py](../tests/test_sessions.py) |
-| #12 合法 MCP permission 被取消 | [transport.py](../agy_provider/transport.py) `_mcp_permission_option`、[tool_turn.py](../agy_provider/tool_turn.py) | [test_mcp_permissions.py](../tests/test_mcp_permissions.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
+| #12 合法 MCP permission 被取消 | [transport.py](../agy_provider/transport.py) `_permission_option`、[tool_turn.py](../agy_provider/tool_turn.py) | [test_mcp_permissions.py](../tests/test_mcp_permissions.py)、[test_tool_pipeline.py](../tests/test_tool_pipeline.py) |
 | #11 内置工具被拒后无正文 | [transport.py](../agy_provider/transport.py) `_reject_request`、[sessions.py](../agy_provider/sessions.py) `Runtime.stream` | [test_permission_attribution.py](../tests/test_permission_attribution.py) |
 | #13 数组参数被桥拒绝 | [tools.py](../agy_provider/tools.py) `ToolSnapshot` / `ToolBroker.dispatch` | [test_tool_schemas.py](../tests/test_tool_schemas.py) |
 | #14 本地能力声明/内容相关 429 | [system_prompt.py](../agy_provider/system_prompt.py)、[provider.py](../agy_provider/provider.py) | [test_system_prompt.py](../tests/test_system_prompt.py)、[test_content_429.py](../tests/test_content_429.py) |

@@ -570,7 +570,7 @@ class FailureEventsAndReadOnlyTests(unittest.IsolatedAsyncioTestCase):
 
         replies = []
         event = types.SimpleNamespace(
-            is_admin=lambda: True,
+            is_admin=lambda: True, should_call_llm=lambda value: None,
             plain_result=lambda text: text,
         )
         with (

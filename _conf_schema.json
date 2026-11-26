@@ -166,6 +166,12 @@
     },
     "hint": "合法整数范围 4096–8388608；非法数值在加载时恢复为默认值并告警。"
   },
+  "builtin_read_file": {
+    "description": "隔离工作区文本读取权限（需工具总闸、已验证 CLI，重载生效）",
+    "type": "string",
+    "options": ["deny", "allow_once"],
+    "default": "deny"
+  },
   "enable_tools": {
     "description": "启用宿主工具桥（需完整工具 schema 与宿主会话）",
     "type": "bool",

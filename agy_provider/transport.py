@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._version import PLUGIN_VERSION
+from .builtin_tools import BUILTINS, BuiltinDenied, read_target, supports_read
 from .config import Settings
 from .context_usage import ContextUsage
 from .errors import AgyError, classified_error, remote_error
@@ -111,6 +112,7 @@ class AcpClient:
         self.output_bytes = 0
         self.closed = False
         self.initialized = False
+        self.verified_read = False
         self.close_lock = asyncio.Lock()
         self.tool_broker = None
         self.permission_denial_count = 0
@@ -162,6 +164,9 @@ class AcpClient:
             )
             if result.get("protocolVersion") != 1:
                 raise AgyError("PROTOCOL", "AGY 未协商 ACP v1。")
+            agent = result.get("agentInfo")
+            self.verified_read = (isinstance(agent, dict) and agent.get("name") == "Antigravity ACP Server"
+                                  and supports_read(agent.get("version")))
             self.initialized = True
             self.capabilities = result.get("agentCapabilities") or {}
         except BaseException:
@@ -408,12 +413,11 @@ class AcpClient:
             # have a strict 16 KiB maximum and are never attached to an exception.
             window = window.rsplit(b"\n", 1)[-1] if b"\n" in window else window
 
-    def _mcp_permission_option(self, params: object) -> tuple[str, str] | None:
-        """Permit only an observed session MCP call to reach the host-owned bridge.
+    def _permission_option(self, params: object) -> tuple[str, str] | None:
+        """Bind a one-time grant to a live observation before returning its option.
 
         This is not host approval or execution. The later tools/call still passes
-        the broker's session/schema/budget checks and AstrBot's executor. Native
-        CLI tools, persistent grants and unbound requests remain fail-closed.
+        the broker's session/schema/budget checks and AstrBot's executor. A scoped read additionally reserves its budget before the reply.
         """
         broker = self.tool_broker
         if (
@@ -435,16 +439,23 @@ class AcpClient:
         ident = call.get("toolCallId")
         if not isinstance(ident, str) or not ident or ident in self.permission_grants:
             return None
-        name = broker.snapshot.notification_name(call.get("name"))
-        observed = broker.notifications.get(ident)
-        if (
-            name is None
-            or observed is None
-            or observed[0] != name
-            or observed[1] not in ("pending", "in_progress")
-            or call.get("status") not in ("pending", "in_progress")
-        ):
+        if call.get("status") not in ("pending", "in_progress"):
             return None
+        if call.get("name") == "read_file":
+            observed = broker.read_calls.get(ident)
+            if (not self.verified_read or not observed or observed[1] != "pending"
+                    or call.get("status") != "pending"
+                    or not broker.settings.enable_tools or broker.settings.builtin_read_file != "allow_once"
+                    or read_target(call, broker.read_workspace) != observed[0]
+                    or ident in broker.read_decisions or broker.read_ledger_full
+                    or broker.count >= broker.settings.tool_max_calls):
+                return None
+        else:
+            name = broker.snapshot.notification_name(call.get("name"))
+            observed = broker.notifications.get(ident)
+            if (name is None or not observed or observed[0] != name
+                    or observed[1] not in ("pending", "in_progress")):
+                return None
         options = params.get("options")
         if not isinstance(options, list):
             return None
@@ -472,10 +483,16 @@ class AcpClient:
         # Deny by default; an allow-once MCP transit grant never executes a tool.
         reply = {"jsonrpc": "2.0", "id": obj["id"]}
         if obj["method"] == "session/request_permission":
-            grant = self._mcp_permission_option(obj.get("params"))
+            grant = self._permission_option(obj.get("params"))
             if grant is not None:
                 ident, option_id = grant
                 self.permission_grants.add(ident)
+                if obj["params"]["toolCall"].get("name") == "read_file":
+                    broker = self.tool_broker
+                    broker.read_decisions[ident] = True
+                    broker.count += 1
+                    if broker.on_builtin_grant:
+                        broker.on_builtin_grant()
                 reply["result"] = {
                     "outcome": {"outcome": "selected", "optionId": option_id}
                 }
@@ -489,10 +506,14 @@ class AcpClient:
                     and asyncio.get_running_loop().time() < self.prompt_deadline
                 ):
                     self.permission_denial_count += 1
+                    call = params.get("toolCall")
+                    call = call if isinstance(call, dict) else {}
+                    name, ident = call.get("name"), call.get("toolCallId")
+                    broker = self.tool_broker
+                    if (broker and isinstance(ident, str) and ident in broker.read_calls
+                            and not broker.read_ledger_full):
+                        broker.read_decisions.setdefault(ident, False)
                     if len(self.permission_errors) < 128:
-                        call = params.get("toolCall")
-                        call = call if isinstance(call, dict) else {}
-                        name, ident = call.get("name"), call.get("toolCallId")
                         self.permission_errors.append(PermissionDenial(
                             method="session/request_permission",
                             tool_name=name[:256] if isinstance(name, str) else None,
@@ -568,6 +589,8 @@ class AcpClient:
             if self.tool_broker is not None:
                 self.tool_broker.observe(update)
                 return
+            if isinstance(update.get("name"), str) and update["name"] in BUILTINS:
+                raise BuiltinDenied("TOOLS_DISABLED")
             raise AgyError(
                 "TOOLS_DISABLED",
                 "AGY 尝试调用内置工具；已中止该轮，请检查 CLI 对无工具 agent 的支持。",

@@ -138,6 +138,15 @@ for line in sys.stdin:
             block_types=[b.get("type") for b in blocks if isinstance(b, dict)],
         )
         cur = active_scenario()
+        if cur in {"builtin-denied", "partial-builtin-denied"}:
+            if cur == "partial-builtin-denied":
+                send({"method": "session/update", "params": {"sessionId": "fake-session", "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "prefix"}}}})
+                time.sleep(0.05)
+            send({"method": "session/update", "params": {"sessionId": "fake-session", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "search-1", "name": "search_web",
+                "status": "in_progress"}}})
+            continue
         if cur in {
             "content-429", "content-429-quota", "content-429-retry-info",
             "content-429-after-text", "content-429-multiline",

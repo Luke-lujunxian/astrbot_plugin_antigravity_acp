@@ -28,6 +28,7 @@ class Settings:
     history_bytes: int = 160000
     max_output_bytes: int = 4194304
     enable_tools: bool = False
+    builtin_read_file: str = "deny"
     enable_images: bool = False
     session_reuse_mode: str = "strict"
     cost_log_enabled: bool = False
@@ -91,6 +92,10 @@ class Settings:
             if type(value) is not bool:
                 raise AgyError("CONFIG", f"{key} 必须是布尔值。")
             parsed[key] = value
+        read_policy = values.get("builtin_read_file", "deny")
+        if read_policy not in ("deny", "allow_once"):
+            raise AgyError("CONFIG", "builtin_read_file 应为 deny/allow_once。")
+        parsed["builtin_read_file"] = read_policy
         reuse_mode = values.get("session_reuse_mode", defaults.session_reuse_mode)
         if not isinstance(reuse_mode, str) or reuse_mode not in {"strict", "structured"}:
             raise AgyError("CONFIG", "session_reuse_mode 应为 strict/structured。")

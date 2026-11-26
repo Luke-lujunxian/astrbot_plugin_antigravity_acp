@@ -12,6 +12,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+from .builtin_tools import BUILTINS, BuiltinDenied, supports_read
 from .config import Settings
 from .errors import AgyError, classified_error
 from .failure_guard import FailureGuard
@@ -157,7 +158,8 @@ def classify_rebuild(
             if getattr(session, "tool_hash", "") != req_tool_hash:
                 reasons.append("tool_hash_changed")
         broker = getattr(session, "broker", None)
-        if broker is not None and len(getattr(broker, "seen", ())) >= 4000:
+        if broker is not None and max(len(getattr(broker, "seen", ())),
+                                      len(getattr(broker, "read_decisions", ()))) >= 4000:
             reasons.append("tool_ledger_limit")
         if history_relation == "host_trim":
             reasons.append("history_host_trim")
@@ -396,12 +398,14 @@ class Runtime:
         info = await self.launch_info()
         if self.stopped:
             raise AgyError("CLOSED", "插件已停用。")
+        read_allowed = (self.settings.enable_tools and self.settings.builtin_read_file == "allow_once"
+                        and supports_read(info.version))
         session.home = await asyncio.to_thread(
             make_home,
             self.root,
             system,
             tools_mode=bool(snapshot and snapshot.tools),
-            settings=self.settings,
+            settings=self.settings, read_allowed=read_allowed,
         )
         session.client = AcpClient(self.settings)
         try:
@@ -417,6 +421,8 @@ class Runtime:
             servers = []
             if snapshot and snapshot.tools:
                 session.broker = ToolBroker(snapshot, self.settings)
+                if read_allowed and session.client.verified_read:
+                    session.broker.read_workspace = session.home / "workspace"
                 session.broker.audit_sink = self.record_tool_outcome
                 servers = [await session.broker.start()]
                 session.client.tool_broker = session.broker
@@ -595,6 +601,8 @@ class Runtime:
                     session.broker.count = 0
                     session.broker.result_bytes = 0
                     session.broker.notifications.clear()
+                    session.broker.read_calls.clear()
+                    session.broker.on_builtin_grant = local_meter.record_builtin_call
                     session.broker.error = None
                 text_parts = []
                 # Reset before a reused client's next turn, including errors
@@ -647,6 +655,8 @@ class Runtime:
                                         "AGY 上游容量不可用，请稍后重试。",
                                     )
                                 if reason == "end_turn" and getattr(session.client, "permission_errors", None):
+                                    if any(d.tool_name in BUILTINS for d in session.client.permission_errors):
+                                        raise BuiltinDenied()
                                     raise AgyError(
                                         "TOOL_PERMISSION",
                                         "AGY 工具权限请求被安全策略拒绝，随后 CLI 结束了本轮且未返回正文。"
@@ -707,6 +717,9 @@ class Runtime:
             finally:
                 if generation_started:
                     local_meter.observe_client(session.client)
+                    if session.broker:
+                        session.broker.on_builtin_grant = None
+                        session.broker.read_calls.clear()
                 # Partial/cancelled turns never become a reusable history prefix.
                 short_circuited = (
                     isinstance(failure_exc, AgyError) and failure_exc.no_retry
@@ -764,6 +777,7 @@ class Runtime:
                     local_meter.observe_output(
                         has_output=output_seen or local_meter.tool_calls > 0
                     )
+                    local_meter.no_fallback = getattr(failure_exc, "no_fallback", False)
                     local_meter.finish(
                         status="cancelled" if cancelled else "error",
                         error_code=error_code,

@@ -220,6 +220,28 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         self.manager.acm.default_conf.pop("dashboard")
         self.assertEqual((await self.service.handle())["status_code"], 403)
 
+    async def test_quota_and_daily_get_are_local_and_admin_only(self):
+        from agy_provider.quota import QuotaService
+        from agy_provider.telemetry import start_diagnostics, stop_diagnostics
+        start_diagnostics(Path(self.temp.name))
+        self.addCleanup(stop_diagnostics)
+        self.service.quota = QuotaService(Settings())
+        self.service.quota.refresh = AsyncMock()
+        self.service.register()
+        for path, handler, methods, _ in self.context.registered_web_apis:
+            self.assertEqual(methods, ["GET"])
+            if path.endswith("/status"):
+                continue
+            for who, code in ((None, 401), ("api_key:123", 403), ("ordinary", 403), ("panel-owner", 200)):
+                self.request.username = who
+                response = await handler()
+                self.assertEqual(response["status_code"], code)
+                self.assertEqual(response["headers"]["Cache-Control"], "no-store")
+                if code == 200 and "/daily/" in path:
+                    self.assertEqual(response["data"]["days"], [])
+                    self.assertEqual(response["data"]["range"]["days"], int(path.rsplit("/", 1)[-1]))
+        self.service.quota.refresh.assert_not_awaited()
+
     async def test_route_lifecycle_only_removes_owned_get_handler(self):
         self.service.register()
         route, handler, methods, _ = self.context.registered_web_apis[0]

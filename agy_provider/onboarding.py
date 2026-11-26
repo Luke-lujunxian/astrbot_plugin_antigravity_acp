@@ -10,6 +10,8 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+from .builtin_tools import supports_read, tool_policy
+from .quota import QuotaService
 from .errors import AgyError
 from .login import LoginFlow
 from .paths import plugin_data_root
@@ -192,8 +194,10 @@ async def ensure_provider_source(manager):
 
 
 class Onboarding:
-    def __init__(self, context, settings):
+    def __init__(self, context, settings, config=None):
         self.context, self.settings = context, settings
+        self.config = config
+        self.quota = QuotaService(settings)
         self.root = plugin_data_root()
         self.csrf = secrets.token_urlsafe(32)
         self.closed = False
@@ -257,8 +261,48 @@ class Onboarding:
                 )
         return rows
 
+    def command_scope_warning(self):
+        manager = getattr(self.context.provider_manager, "acm", None)
+        conf = getattr(manager, "default_conf", {}) or {}
+        scope = conf.get("plugin_set", ["*"])
+        if isinstance(scope, list) and scope != ["*"] and PLUGIN_NAME not in scope:
+            return "默认配置的可用插件未包含 Antigravity ACP。请在目标会话的配置 → 可用插件中勾选 astrbot_plugin_antigravity_acp 并保存，以接收 /agy 指令。"
+        return None
+
+    def _read_supported(self):
+        return self.report.get("verified_read") is True and supports_read(self.report.get("cli_version"))
+
+    def policy(self):
+        saved = (self.config or {}).get("builtin_read_file", self.settings.builtin_read_file)
+        return tool_policy(self.settings, saved, self._read_supported())
+
+    def save_policy(self, data):
+        value = data.get("read_file")
+        if set(data) != {"csrf", "read_file"} or value not in ("deny", "allow_once"):
+            raise AgyError("CONFIG", "工具策略参数无效。")
+        if value == "allow_once" and not self._read_supported():
+            raise AgyError("UNSUPPORTED", "请先完成受支持 CLI 的版本检测。")
+        config = self.config
+        save = getattr(config, "save_config", None)
+        if not callable(save):
+            raise RuntimeError("无法保存插件配置。")
+        had = "builtin_read_file" in config
+        previous = config.get("builtin_read_file")
+        config["builtin_read_file"] = value
+        try:
+            save()
+        except Exception:
+            if had:
+                config["builtin_read_file"] = previous
+            else:
+                del config["builtin_read_file"]
+            raise
+        return self.policy()
+
     def snapshot(self, owner=""):
         return {
+            "tool_policy": self.policy(),
+            "command_scope_warning": self.command_scope_warning(),
             "csrf": self.csrf, "busy": self.busy, "operation": self.operation,
             "report": deepcopy(self.report), "hint": next_step(self.report),
             "cached_models": deepcopy(self._known_models()),
@@ -531,7 +575,7 @@ class Onboarding:
         for action in (
             "status", "check", "login", "login-code", "login-cancel", "apply",
             "provider-impact", "provider-default", "provider-delete",
-            "provider-toggle", "provider-update", "provider-repair",
+            "provider-toggle", "provider-update", "provider-repair", "tool-policy", "quota-refresh",
         ):
             async def handler(action=action):
                 return await self.handle(action)
@@ -551,6 +595,8 @@ class Onboarding:
             return error_response("仅 AstrBot 面板管理员可使用设置页面。", status_code=403, headers=headers)
         try:
             if self.closed:
+                if action in ("tool-policy", "quota-refresh"):
+                    return error_response("插件已停用。", status_code=503, headers=headers)
                 raise AgyError("CLOSED", "插件已停用。")
             if action != "status":
                 if (request.content_type or "").split(";", 1)[0].strip().lower() != "application/json":
@@ -569,6 +615,14 @@ class Onboarding:
                 model = data.get("model", "")
                 if not isinstance(model, str) or len(model) > 1024:
                     raise AgyError("CONFIG", "模型 ID 无效。")
+                if action == "tool-policy":
+                    return json_response(self.save_policy(data), headers=headers)
+                if action == "quota-refresh":
+                    if set(data) != {"csrf"}:
+                        raise AgyError("CONFIG", "额度刷新不接受附加参数。")
+                    if self.login.busy:
+                        raise AgyError("BUSY", "登录中，请稍后刷新。")
+                    return json_response(await self.quota.refresh(force=True), headers=headers)
                 if action == "provider-repair":
                     self._available()
                     if data.keys() == {"csrf", "all"} and data.get("all") is True:
@@ -640,6 +694,7 @@ class Onboarding:
                     self._available()
                     self.result, self.action_error = None, ""
                     self.report = {"status": "pending", "stage": "authentication"}
+                    self.quota.invalidate()
                     self.login.start(request.username)
                 elif action == "login-code":
                     await self.login.submit(request.username, data.get("ticket", ""), data.get("code"))
@@ -671,3 +726,4 @@ class Onboarding:
                 self.job.cancel()
             await asyncio.gather(self.job, return_exceptions=True)
         await self.login.close()
+        await self.quota.close()

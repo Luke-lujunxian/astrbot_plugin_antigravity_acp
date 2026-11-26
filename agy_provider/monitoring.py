@@ -1,25 +1,30 @@
-"""Read-only, dashboard-admin monitoring; never starts or probes a runtime."""
+"""Dashboard-admin snapshots; GET never starts a CLI or queries remote quota."""
 
+import sqlite3
 from datetime import datetime, timezone
 
 from .onboarding import PLUGIN_NAME
 from .routing import dashboard_admin, routing_snapshot
-from .telemetry import failure_snapshot
+from .telemetry import daily_snapshot, failure_snapshot
 
 
 class Monitoring:
-    def __init__(self, context):
+    def __init__(self, context, quota=None):
         self.context = context
+        self.quota = quota
         self.closed = False
         self.routes = []
 
     def register(self):
-        route = f"/{PLUGIN_NAME}/monitor/status"
-        handler = self.handle
-        self.context.register_web_api(route, handler, ["GET"], "AGY 运行概览")
-        self.routes.append((route, handler))
+        for resource in ("status", "quota", "daily/30", "daily/90", "daily/365"):
+            async def handler(resource=resource):
+                return await self.handle(resource)
 
-    async def handle(self):
+            route = f"/{PLUGIN_NAME}/monitor/{resource}"
+            self.context.register_web_api(route, handler, ["GET"], "AGY 运行概览")
+            self.routes.append((route, handler))
+
+    async def handle(self, resource="status"):
         from astrbot.api.web import error_response, json_response, request
         from .provider import instance_monitor_snapshots
 
@@ -36,6 +41,16 @@ class Monitoring:
         if self.closed:
             return error_response("插件已停用。", status_code=503, headers=headers)
         try:
+            if resource == "quota":
+                if self.quota is None:
+                    return error_response("额度服务尚未就绪。", status_code=503, headers=headers)
+                return json_response(self.quota.snapshot(), headers=headers)
+            if resource.startswith("daily/"):
+                try:
+                    payload = daily_snapshot(int(resource.split("/")[1]))
+                except (OSError, sqlite3.Error):
+                    return error_response("每日统计存储不可用。", status_code=503, headers=headers)
+                return json_response(payload, headers=headers)
             # No await within collection: all runtime/telemetry mutations run
             # on the same event loop, so these fields share one consistent view.
             payload = {

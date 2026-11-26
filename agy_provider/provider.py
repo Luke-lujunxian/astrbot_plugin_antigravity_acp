@@ -12,6 +12,7 @@ from astrbot.api.provider import LLMResponse, Provider
 from astrbot.core.provider.entities import TokenUsage
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+from .builtin_tools import BuiltinDenied
 from .config import Settings
 from .errors import AgyError
 from .media import ImageFingerprints, prepare_media
@@ -792,6 +793,17 @@ class AgyProvider(Provider):
                     )
             if not done_seen and not handed_off:
                 raise AgyError("EMPTY", "AGY 未返回最终响应。")
+        except BuiltinDenied as exc:
+            exit_status, exit_code = "error", exc.code
+            if meter.replay_blocked or handed_off or continuation:
+                raise
+            # Runtime retired the failed native session and recorded its cost.
+            # Deliver a local terminal message; a new user turn can proceed.
+            notice = "本轮请求了受限的 CLI 内置工具，无法继续取得结果。你可以继续提问，或使用 AstrBot 已启用的工具。"
+            done_seen = True
+            if streaming:
+                yield LLMResponse(role="assistant", completion_text=notice, is_chunk=True)
+            yield LLMResponse(role="assistant", completion_text=notice, is_chunk=False)
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 exit_status = "cancelled"
@@ -817,7 +829,7 @@ class AgyProvider(Provider):
             try:
                 await events.aclose()
             except Exception as exc:
-                if meter.replay_blocked:
+                if meter.replay_blocked or done_seen:
                     if isinstance(exc, AgyError):
                         exc.no_retry = exc.no_fallback = True
                         raise

@@ -274,6 +274,7 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             "provider-delete",
             "provider-update",
             "provider-repair",
+            "tool-policy", "quota-refresh",
         )
         self.request.username = ""
         for action in actions:
@@ -329,7 +330,11 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         own = list(self.context.registered_web_apis)
         other = (own[0][0], AsyncMock(), ["GET"], "another instance")
         self.context.registered_web_apis.append(other)
-        self.assertEqual(len(own), 12)
+        self.assertEqual(len(own), 14)
+        self.assertEqual({row[0].rsplit("/", 1)[-1] for row in own}, {
+            "status", "check", "login", "login-cancel", "login-code", "apply", "provider-impact",
+            "provider-default", "provider-delete", "provider-toggle", "provider-update",
+            "provider-repair", "quota-refresh", "tool-policy"})
         await self.service.close()
         self.assertEqual(self.context.registered_web_apis, [other])
         self.assertEqual((await self.call("status"))["status_code"], 400)
@@ -342,6 +347,35 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             replacement = Onboarding(self.context, Settings())
         self.assertNotEqual(self.service.csrf, replacement.csrf)
         await replacement.close()
+
+    async def test_tool_policy_saved_separately_and_failure_rolls_back(self):
+        from tests.test_main_init import FakePluginConfig
+        self.service.config = FakePluginConfig({})
+        data = {"csrf": self.service.csrf, "read_file": "allow_once"}
+        self.assertEqual((await self.call("tool-policy", data))["status_code"], 400)
+        self.service.report.update(cli_version="1.5.17", verified_read=True)
+        with patch("agy_provider.onboarding.supports_read", return_value=True):
+            result = (await self.call("tool-policy", data))["data"]
+        self.assertTrue(result["reload_required"])
+        self.assertEqual(self.service.config, {"builtin_read_file": "allow_once"})
+        self.assertEqual(self.service.settings.builtin_read_file, "deny")
+        self.service.config.save_error = OSError("private")
+        data["read_file"] = "deny"
+        response = await self.call("tool-policy", data)
+        self.assertEqual(response["status_code"], 500)
+        self.assertNotIn("private", str(response))
+        self.assertEqual(self.service.config["builtin_read_file"], "allow_once")
+
+    async def test_quota_refresh_requires_nonce_and_only_explicit_action_queries(self):
+        self.service.quota.refresh = AsyncMock(return_value={"groups": []})
+        self.assertEqual((await self.call("quota-refresh", {"csrf": "expired"}))["status_code"], 403)
+        self.assertEqual((await self.call("quota-refresh", {"csrf": self.service.csrf, "model": "x"}))["status_code"], 400)
+        self.manager.acm.default_conf["plugin_set"] = ["other"]
+        status = (await self.call("status"))["data"]
+        self.assertIn("可用插件", status["command_scope_warning"])
+        self.service.quota.refresh.assert_not_awaited()
+        self.assertEqual((await self.call("quota-refresh"))["data"], {"groups": []})
+        self.service.quota.refresh.assert_awaited_once_with(force=True)
 
     async def test_mutual_exclusion_and_duplicate_click(self):
         gate = asyncio.Event()

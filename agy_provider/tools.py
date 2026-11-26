@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .builtin_tools import BUILTINS, BuiltinDenied, read_target
 from .config import Settings
 from .bridge_transport import BridgeTransport, TOKEN_ENV
 from .errors import AgyError
@@ -370,6 +371,10 @@ class ToolBroker:
         self.closed = False
         self.tasks = set()
         self.notifications = {}
+        self.read_workspace = None
+        self.read_calls = {}
+        self.read_decisions = {}
+        self.on_builtin_grant = None
         self.error = None
         self.close_task = None
         self.audit_sink = None
@@ -587,17 +592,54 @@ class ToolBroker:
             {"content": [{"type": "text", "text": content}], "isError": False}
         )
 
+    @property
+    def read_ledger_full(self):
+        return len(self.read_decisions) >= MAX_SESSION_CALLS
+
+    def observe_read(self, update, ident, raw_name):
+        if not self.read_workspace:
+            raise BuiltinDenied()
+        previous = self.read_calls.get(ident)
+        if not ident or len(ident) > 256 or ident in self.notifications or raw_name not in ("read_file", None):
+            raise BuiltinDenied()
+        if previous is None and (
+            update.get("sessionUpdate") != "tool_call" or raw_name != "read_file"
+            or ident in self.read_decisions or self.read_ledger_full
+            or len(self.read_calls) + len(self.notifications) >= self.settings.tool_max_calls
+        ):
+            raise BuiltinDenied()
+        status = update.get("status")
+        if status not in ("in_progress", "pending", "completed", "failed"):
+            raise BuiltinDenied()
+        if previous and previous[1] in ("completed", "failed"):
+            raise BuiltinDenied()
+        if status == "completed" and not self.read_decisions.get(ident):
+            raise BuiltinDenied()
+        target = read_target(update, self.read_workspace)
+        if previous and not any(k in update for k in ("rawInput", "args", "locations")):
+            target = previous[0]
+        if target is None or (previous and previous[0] != target):
+            raise BuiltinDenied()
+        self.read_calls[ident] = (target, status)
+
     def observe(self, update):
         ident = update.get("toolCallId")
         if not isinstance(ident, str):
             raise AgyError("TOOL_PROTOCOL", "工具通知缺少 ID。")
-        name = self.snapshot.notification_name(update.get("name"))
+        raw_name = update.get("name")
+        if ident in self.read_calls or raw_name == "read_file":
+            self.observe_read(update, ident, raw_name)
+            return
+        if isinstance(raw_name, str) and raw_name in BUILTINS:
+            raise BuiltinDenied()
+        name = self.snapshot.notification_name(raw_name)
         previous = self.notifications.get(ident)
         if name is None and ("name" in update or previous is None):
-            raise AgyError("TOOL_PERMISSION", "AGY 尝试调用未授权的内置工具。")
+            raise AgyError("TOOL_PERMISSION", "AGY 尝试调用未授权的工具。",
+                           no_retry=True, no_fallback=True)
         if previous and name and previous[0] != name:
             raise AgyError("TOOL_PROTOCOL", "工具通知 ID 名称发生变化。")
-        if not previous and len(self.notifications) >= self.settings.tool_max_calls:
+        if not previous and len(self.notifications) + len(self.read_calls) >= self.settings.tool_max_calls:
             raise AgyError("TOOL_BUDGET", "工具通知超过本轮预算。")
         status = update.get("status", "in_progress")
         if previous and previous[1] in {"completed", "failed"}:
