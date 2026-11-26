@@ -12,8 +12,9 @@ const themeKey = "agy-acp.setup.theme";
 try { const saved = window.localStorage?.getItem(themeKey); if (["auto", "light", "dark"].includes(saved)) themeMode = saved; } catch {}
 let monitorTimer, monitorPending = false, monitorReady = false, monitorSnapshot;
 
-// 账号额度状态（GET monitor/quota 只读缓存，POST setup/quota-refresh 手动触发，无后台轮询）
+// 进入监控页时读额度缓存，按需查询。
 let quotaSnapshot = null, quotaLoading = false, quotaRequestError = "", quotaCountdownTimer;
+let quotaRead, quotaPost, quotaVisitPending = true;
 
 // 每日用量与热力图状态（GET monitor/daily/{30|90|365}）
 let dailyDays = 90, dailyMetric = "requests", dailyModel = "";
@@ -137,6 +138,7 @@ function formatEffortBadge(effort, globalEffort) {
 }
 
 function switchTab(next) {
+  const previous = activeTab;
   activeTab = next;
   for (const name of ["monitor", "models", "tools", "setup"]) {
     const panel = $(`tab-${name}`);
@@ -146,6 +148,16 @@ function switchTab(next) {
       btn.classList.toggle("is-active", name === next);
       if (name === next) btn.setAttribute("aria-current", "page");
       else btn.removeAttribute?.("aria-current");
+    }
+  }
+  if (previous !== next) {
+    quotaRead = null;
+    quotaSnapshot = null;
+    quotaRequestError = "";
+    quotaVisitPending = next === "monitor";
+    if (next === "monitor") {
+      renderQuota();
+      checkQuotaOnEntry();
     }
   }
 }
@@ -417,7 +429,7 @@ function formatPanelError(error, fallback = "请求失败，请稍后重试。")
 function getCurrentFault(recent) {
   if (!Array.isArray(recent) || !recent.length) return null;
   const latest = recent[0];
-  if (!latest || latest.status === "ok" || latest.status === "cancelled") return null;
+  if (!latest || latest.historical || latest.status === "ok" || latest.status === "cancelled") return null;
   if (latest.error_code === "CANCELLED") return null;
   if (latest.error_code || latest.status === "error" || latest.status === "short_circuited") return latest;
   return null;
@@ -788,6 +800,11 @@ function renderMonitor(data) {
     if (row.enabled && row.runtime_state === "active") enabledBadge.dataset.state = "ready";
     const modeLabel = row.effective_mode === "tools" ? "工具模式" : row.effective_mode === "chat" ? "纯聊天" : "模式未知";
     badges.append(enabledBadge, el("span", "badge", modeLabel));
+    if (row.history_storage === "memory_only") {
+      const storageBadge = el("span", "badge", "仅内存统计");
+      storageBadge.dataset.state = "warn";
+      badges.append(storageBadge);
+    }
     head.append(idGroup, badges);
     card.append(head);
 
@@ -920,7 +937,7 @@ function renderQuota(nextData) {
   const updatedEl = $("quota-updated");
   const refreshBtn = $("quota-refresh");
 
-  refreshBtn.disabled = quotaLoading || !monitorReady || !state?.csrf || activeLogin(state?.login);
+  refreshBtn.disabled = Boolean(quotaPost) || !canReadQuota();
   refreshBtn.textContent = quotaLoading ? "查询中…" : "刷新额度";
 
   const snap = quotaSnapshot;
@@ -939,7 +956,7 @@ function renderQuota(nextData) {
 
   // 状态徽标
   if (quotaLoading) {
-    badge("quota-badge", "查询中", "");
+    badge("quota-badge", hasGroups ? "更新中" : "查询中", "");
   } else if (quotaRequestError) {
     badge("quota-badge", hasGroups ? "数据过期" : "查询失败", hasGroups ? "warn" : "error");
   } else if (isUnsupported) {
@@ -954,35 +971,14 @@ function renderQuota(nextData) {
     badge("quota-badge", "已更新", "ready");
   }
 
-  // 提示横幅（加载 / 错误 / 过期）
-  if (quotaLoading && hasGroups) {
-    alertEl.className = "alert alert-warn";
-    alertEl.textContent = "正在通过官方 CLI 获取最新额度（最长约 30 秒），以下暂显示上次结果…";
-    alertEl.hidden = false;
-  } else if (quotaLoading) {
-    alertEl.textContent = "";
-    alertEl.hidden = true;
-  } else if (quotaRequestError) {
-    alertEl.className = "alert alert-error";
-    alertEl.textContent = hasGroups ? `${quotaRequestError} 以下保留上次缓存数据（已过期）。` : quotaRequestError;
-    alertEl.hidden = false;
-  } else if (snapError) {
-    alertEl.className = "alert alert-error";
-    const errText = formatQuotaError(snapError);
-    alertEl.textContent = hasGroups ? `${errText} 以下保留上次缓存数据（已过期）。` : errText;
-    alertEl.hidden = false;
-  } else if (isStale) {
-    alertEl.className = "alert alert-warn";
-    alertEl.textContent = "当前展示的是缓存额度且已过期，点击右上角「刷新额度」获取最新状态。";
-    alertEl.hidden = false;
-  } else {
-    alertEl.textContent = "";
-    alertEl.hidden = true;
-  }
+  const errorText = quotaLoading ? "" : quotaRequestError || formatQuotaError(snapError);
+  alertEl.className = "alert alert-error";
+  alertEl.textContent = errorText;
+  alertEl.hidden = !errorText;
 
   // 主体内容
   if (quotaLoading && !hasGroups) {
-    bodyEl.replaceChildren(el("div", "quota-empty", "正在通过官方 CLI 查询账号额度，最长约 30 秒，请稍候…"));
+    bodyEl.replaceChildren(el("div", "quota-empty", "正在查询额度…"));
   } else if (hasGroups) {
     const grid = el("div", "quota-groups");
     groups.forEach((group) => {
@@ -1051,41 +1047,47 @@ function renderQuota(nextData) {
       grid.append(box);
     });
     bodyEl.replaceChildren(grid);
-  } else if (isUnsupported) {
-    bodyEl.replaceChildren(el("div", "quota-empty", "当前官方 AGY CLI 版本暂不支持额度查询，请升级官方 CLI 后重试。"));
-  } else if (snapError || quotaRequestError) {
-    bodyEl.replaceChildren(el("div", "quota-empty", "暂无可展示的账号额度数据，解决问题后点击「刷新额度」。"));
+  } else if (isUnsupported || snapError || quotaRequestError) {
+    bodyEl.replaceChildren(el("div", "quota-empty", "暂无额度数据"));
   } else if (isUnqueried) {
-    bodyEl.replaceChildren(el("div", "quota-empty", "尚未查询账号额度。点击右上角「刷新额度」或发送 /agy quota 通过官方 CLI 获取。"));
+    bodyEl.replaceChildren(el("div", "quota-empty", "尚未查询账号额度"));
   } else {
     bodyEl.replaceChildren(el("div", "quota-empty", "本次查询未返回可用额度组。"));
   }
 
-  // 紧凑元信息（不暴露内部 login_env，不猜测套餐）
-  if (snap) {
-    const parts = [];
-    if (snap.cli_version) parts.push(`官方 CLI ${snap.cli_version}`);
-    if (snap.fetched_at) parts.push(`采样于 ${monitorTime(snap.fetched_at)}`);
-    parts.push("同组模型共享额度，仅手动刷新或指令查询");
-    metaEl.textContent = parts.join(" · ");
-  } else {
-    metaEl.textContent = "仅在手动刷新或执行 /agy quota 时查询，无后台轮询。";
-  }
+  metaEl.textContent = hasGroups ? "同组模型共享额度" : "";
 
   scheduleQuotaCountdown();
 }
 
+function canReadQuota() {
+  return monitorReady && typeof state?.csrf === "string" && Boolean(state.csrf)
+    && !disposed && !suspended && !document.hidden && activeTab === "monitor" && !activeLogin(state.login);
+}
+
+function checkQuotaOnEntry() {
+  if (!quotaVisitPending || quotaRead || quotaPost || !canReadQuota()) return;
+  quotaVisitPending = false;
+  return refreshQuotaCache();
+}
+
 async function refreshQuotaCache() {
-  if (disposed || suspended || !monitorReady) return;
-  const epoch = refreshEpoch;
+  const read = {};
+  quotaRead = read;
   try {
     const data = await bridge.apiGet("monitor/quota");
-    if (!disposed && epoch === refreshEpoch) renderQuota(data);
+    if (quotaRead !== read || !canReadQuota()) return;
+    renderQuota(data);
+    if (!data.fetched_at || data.stale) {
+      quotaRead = null;
+      await refreshQuota(false);
+    }
   } catch (error) {
-    if (disposed || epoch !== refreshEpoch) return;
+    if (quotaRead !== read || !canReadQuota()) return;
+    quotaSnapshot = null;
     if (error?.message === "quota schema") {
-      // 兼容尚未提供该接口的测试桩或旧响应，保持未查询态不报全局错误
-      if (!quotaSnapshot) renderQuota();
+      quotaRequestError = "";
+      renderQuota();
       return;
     }
     const parsed = parseBridgeError(error);
@@ -1113,23 +1115,33 @@ async function refreshQuotaCache() {
       quotaRequestError = "暂时无法读取额度缓存，请点击「刷新额度」重试。";
     }
     renderQuota();
+  } finally {
+    if (quotaRead === read) quotaRead = null;
   }
 }
 
-async function refreshQuotaManual() {
-  if (disposed || quotaLoading || !monitorReady || !state?.csrf || activeLogin(state?.login)) return;
-  const epoch = refreshEpoch;
+function refreshQuotaManual() {
+  return refreshQuota(true);
+}
+
+async function refreshQuota(force) {
+  if (quotaPost || !canReadQuota()) return;
+  quotaRead = null;
+  quotaVisitPending = false;
+  const post = {epoch: refreshEpoch};
+  quotaPost = post;
+  const current = () => !disposed && !post.cancelled && post.epoch === refreshEpoch;
   quotaLoading = true;
   quotaRequestError = "";
   renderQuota();
   try {
-    const data = await bridge.apiPost("setup/quota-refresh", {csrf: state.csrf});
-    if (disposed || epoch !== refreshEpoch) return;
-    quotaLoading = false;
+    const data = await bridge.apiPost("setup/quota-refresh", force ? {csrf: state.csrf} : {csrf: state.csrf, force});
+    if (!current()) return;
     renderQuota(data);
+    quotaVisitPending = false;
   } catch (error) {
-    if (disposed || epoch !== refreshEpoch) return;
-    quotaLoading = false;
+    if (!current()) return;
+    quotaSnapshot = null;
     const parsed = parseBridgeError(error);
     if (isAuthDeniedError(error)) {
       quotaRequestError = "无权刷新账号额度或登录已过期，请重新登录后重试。";
@@ -1154,7 +1166,13 @@ async function refreshQuotaManual() {
     } else {
       quotaRequestError = "额度刷新请求失败，请稍后重试。";
     }
-    renderQuota();
+  } finally {
+    quotaPost = null;
+    quotaLoading = false;
+    if (!disposed && !suspended && !document.hidden) {
+      renderQuota();
+      checkQuotaOnEntry();
+    }
   }
 }
 
@@ -2240,12 +2258,20 @@ async function openImpactModal(providerId, op) {
 function render(data) {
   const prevBusy = Boolean(state?.busy);
   const prevLoginBusy = activeLogin(state?.login);
+  const prevCsrf = state?.csrf;
   data = {...data, report: data.report || {}, login: data.login || {}, environment: data.environment || {}, providers: Array.isArray(data.providers) ? data.providers : []};
   state = data;
   const r = data.report, login = data.login;
   renderRouting(data.routing ?? monitorSnapshot?.routing);
   renderAlerts(data);
   syncToolPolicyFromServer(data.tool_policy);
+  if ((!prevLoginBusy && activeLogin(login)) || (prevCsrf && prevCsrf !== state.csrf)) {
+    quotaRead = null;
+    if (quotaPost) quotaPost.cancelled = true;
+    quotaLoading = false;
+    quotaSnapshot = null;
+    quotaRequestError = "";
+  }
   renderQuota();
   const busy = pending || data.busy || activeLogin(login);
   const passed = r.status === "passed";
@@ -2436,11 +2462,11 @@ function render(data) {
 
   if (data.action_error) showError(`${data.action_error}：${data.action_hint}`);
   if (monitorSnapshot) renderMonitor(monitorSnapshot);
-  if ((prevBusy && !data.busy) || (prevLoginBusy && !activeLogin(login))) {
-    if (monitorReady) {
-      refreshMonitor();
-      refreshQuotaCache();
-    }
+  const loginFinished = prevLoginBusy && !activeLogin(login);
+  if (monitorReady && ((prevBusy && !data.busy) || loginFinished)) refreshMonitor();
+  if (prevCsrf !== state.csrf || loginFinished) {
+    quotaVisitPending = true;
+    checkQuotaOnEntry();
   }
 }
 
@@ -2582,6 +2608,11 @@ async function poll() {
 
 function pauseRefresh() {
   ++refreshEpoch;
+  quotaRead = null;
+  quotaLoading = false;
+  quotaVisitPending = true;
+  quotaSnapshot = null;
+  quotaRequestError = "";
   clearTimeout(timer);
   clearTimeout(monitorTimer);
   clearTimeout(quotaCountdownTimer);
@@ -2593,7 +2624,8 @@ function resumeRefresh() {
   if (disposed || suspended || document.hidden || !monitorReady) return;
   poll();
   refreshMonitor();
-  scheduleQuotaCountdown();
+  renderQuota();
+  checkQuotaOnEntry();
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -2637,7 +2669,6 @@ if (!bridge) {
       renderQuota();
       renderToolPolicy();
       refreshMonitor();
-      refreshQuotaCache();
       loadDailyUsage(dailyDays);
       await poll();
     }

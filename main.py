@@ -267,11 +267,14 @@ class AgyProviderPlugin(Star):
             self.registered = False
             raise
         manager = self.context.provider_manager
-        if any(config.get("type") == PROVIDER_TYPE for config in manager.providers_config):
+        if any(manager.get_merged_provider_config(config).get("type") == PROVIDER_TYPE
+               for config in manager.providers_config):
             try:
                 await ensure_provider_source(manager)
             except Exception:
                 logger.warning("AGY 模型来源关联保存失败；已有模型仍可使用，请在插件面板重新保存模型。")
+        data_root = plugin_data_root()
+        start_diagnostics(data_root)
         # Startup: ProviderManager.initialize follows plugin initialization.
         # Hot reload / re-enable: restore only instances this plugin removed.
         restore_ids = getattr(manager, RESTORE_IDS, set())
@@ -289,7 +292,6 @@ class AgyProviderPlugin(Star):
             "已注册 agy_acp。打开插件详情 → 首次设置，或发送 /agy setup 开始引导。"
         )
         self.stopping = False
-        start_diagnostics(plugin_data_root())
         self.setup_service = Onboarding(self.context, settings, self.config)
         if warning := self.setup_service.command_scope_warning():
             logger.warning(warning)
@@ -297,7 +299,6 @@ class AgyProviderPlugin(Star):
         self.monitor_service = Monitoring(self.context, self.setup_service.quota)
         self.monitor_service.register()
         active_names = {inst.runtime.root.name for inst in active_instances()}
-        data_root = plugin_data_root()
         self.cleanup_task = asyncio.create_task(
             asyncio.to_thread(cleanup_stale_dirs, data_root, active_names=active_names),
             name="agy:stale-cleanup",

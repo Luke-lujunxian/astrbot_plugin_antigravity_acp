@@ -397,6 +397,15 @@ test("streamlined monitor keeps core KPIs and SVG charts, hides internal fields,
   assert.ok(overviewTexts.includes("75.0%"));
   assert.ok(overviewTexts.includes("60.0%"));
 
+  const reloaded = structuredClone(payload);
+  reloaded.instances[0].history_storage = "memory_only";
+  reloaded.instances[0].recent_turns.forEach(turn => { turn.historical = true; });
+  ui.api.renderMonitor(reloaded);
+  const reloadedNodes = collectNodes(ui.get("monitor-instances").children[0]);
+  assert.ok(reloadedNodes.some(n => n.classList?.contains("latency-svg")));
+  assert.ok(reloadedNodes.some(n => n.textContent === "仅内存统计"));
+  assert.ok(!reloadedNodes.some(n => n.className === "fault-banner"));
+
   // 新一轮请求成功后，当前异常提示自动消失（历史错误不常驻）
   const recovered = structuredClone(payload);
   recovered.instances[0].recent_turns.unshift({
@@ -883,9 +892,10 @@ test("quota panel handles unqueried, loading, populated, null reset/fraction, st
     capability: "supported", fetched_at: null, stale: false, groups: [], error: null,
   };
   const ui = await boot(base(), {
-    apiGet: async (ep) => ep === "monitor/quota" ? unqueried : base(),
+    apiGet: async (ep) => ep === "monitor/quota" ? {...unqueried, fetched_at: "2026-11-26T05:00:00Z"} : base(),
   });
   await new Promise(resolve => setImmediate(resolve));
+  ui.api.renderQuota(unqueried);
   assert.equal(ui.get("quota-badge").textContent, "未查询");
   assert.match(collectNodes(ui.get("quota-body")).map(n => n.textContent).join(" "), /尚未查询/);
 
@@ -980,7 +990,7 @@ test("quota panel handles unqueried, loading, populated, null reset/fraction, st
   });
   assert.equal(ui.get("quota-badge").textContent, "暂不支持");
 
-  // 契约 14:20 变更：登录进行中返回 409 时给出明确提示并保留旧缓存状态
+  // 登录进行中时清空无法确认归属的旧额度。
   ui.api.renderQuota(populated);
   ui.bridge.apiPost = async () => {
     const err = new Error("login in progress");
@@ -989,7 +999,136 @@ test("quota panel handles unqueried, loading, populated, null reset/fraction, st
   };
   await ui.api.refreshQuotaManual();
   assert.match(ui.get("quota-alert").textContent, /登录正在进行中/);
+  assert.equal(ui.get("quota-badge").textContent, "查询失败");
+  assert.ok(!collectNodes(ui.get("quota-body")).some(n => n.textContent === "Gemini 组"));
+});
+
+const quotaSample = (name = "Gemini", overrides = {}) => ({
+  schema_version: 1, login_env: "env-a", capability: "supported",
+  fetched_at: "2026-11-26T05:00:00Z", stale: false, error: null,
+  groups: [{name, buckets: []}], ...overrides,
+});
+const flushRequests = () => new Promise(resolve => setImmediate(resolve));
+const quotaReads = ui => ui.getRequests.filter(endpoint => endpoint === "monitor/quota").length;
+const quotaHasGroup = (ui, name) => collectNodes(ui.get("quota-body")).some(n => n.textContent === name);
+
+test("quota checks cache on entry and restoration, never on ordinary polling", async () => {
+  let cache = quotaSample("", {groups: [], fetched_at: null});
+  let release;
+  const ui = await boot(base(), {
+    apiGet: async endpoint => endpoint === "monitor/quota" ? cache : base(),
+    apiPost: () => new Promise(resolve => { release = resolve; }),
+  });
+  assert.equal(quotaReads(ui), 1);
+  assert.equal(ui.requests.length, 1);
+  assert.deepEqual({...ui.requests[0].body}, {csrf: "test-nonce", force: false});
+  assert.equal(ui.get("quota-badge").textContent, "查询中");
+  await ui.api.refreshQuotaManual();
+  assert.equal(ui.requests.length, 1);
+  cache = quotaSample("首次采样");
+  release(cache);
+  await flushRequests();
+  assert.ok(quotaHasGroup(ui, "首次采样"));
+
+  await ui.api.poll();
+  await ui.api.refreshMonitor();
+  assert.equal(quotaReads(ui), 1);
+  ui.get("tab-btn-setup").onclick();
+  ui.get("tab-btn-monitor").onclick();
+  await flushRequests();
+  assert.equal(quotaReads(ui), 2);
+  assert.equal(ui.requests.length, 1);
+
+  cache = {...cache, stale: true};
+  ui.doc.hidden = true;
+  ui.handlers.visibilitychange();
+  ui.doc.hidden = false;
+  ui.handlers.visibilitychange();
+  await flushRequests();
+  assert.equal(quotaReads(ui), 3);
+  assert.equal(ui.requests.length, 2);
+  assert.equal(ui.get("quota-badge").textContent, "更新中");
+  assert.ok(quotaHasGroup(ui, "首次采样"));
+  release({...cache, error: {code: "TIMEOUT"}});
+  await flushRequests();
   assert.equal(ui.get("quota-badge").textContent, "数据过期");
+  assert.ok(quotaHasGroup(ui, "首次采样"));
+
+  cache = quotaSample("恢复后的缓存");
+  ui.handlers.pagehide({persisted: true});
+  ui.handlers.pageshow({persisted: true});
+  ui.handlers.visibilitychange();
+  await flushRequests();
+  assert.equal(quotaReads(ui), 4);
+  assert.equal(ui.requests.length, 2);
+  assert.ok(quotaHasGroup(ui, "恢复后的缓存"));
+});
+
+test("manual quota refresh supersedes an older GET and unload discards later POST", async () => {
+  let releaseRead, releasePost;
+  const ui = await boot(base(), {
+    apiGet: async endpoint => endpoint === "monitor/quota"
+      ? new Promise(resolve => { releaseRead = resolve; }) : base(),
+    apiPost: () => new Promise(resolve => { releasePost = resolve; }),
+  });
+  const manual = ui.api.refreshQuotaManual();
+  releasePost(quotaSample("手动结果"));
+  await manual;
+  releaseRead(quotaSample("迟到的缓存", {stale: true}));
+  await flushRequests();
+  assert.deepEqual({...ui.requests[0].body}, {csrf: "test-nonce"});
+  assert.equal(ui.requests.length, 1);
+  assert.ok(quotaHasGroup(ui, "手动结果"));
+
+  const late = ui.api.refreshQuotaManual();
+  const status = ui.get("quota-badge").textContent;
+  ui.handlers.pagehide();
+  releasePost(quotaSample("迟到的查询"));
+  await late;
+  assert.equal(ui.get("quota-badge").textContent, status);
+  assert.ok(!quotaHasGroup(ui, "迟到的查询"));
+});
+
+test("quota waits for login and a readable cache, then ignores a pre-login POST", async () => {
+  let status = {...base(), login: {state: "waiting", busy: true}};
+  let failGet = true, releasePost;
+  const ui = await boot(status, {
+    apiGet: async endpoint => {
+      if (endpoint !== "monitor/quota") return status;
+      if (failGet) throw new Error("cache unavailable");
+      return quotaSample("", {groups: [], fetched_at: null});
+    },
+    apiPost: () => new Promise(resolve => { releasePost = resolve; }),
+  });
+  assert.equal(quotaReads(ui), 0);
+  status = base();
+  await ui.api.poll();
+  await flushRequests();
+  assert.equal(quotaReads(ui), 1);
+  assert.equal(ui.requests.length, 0);
+  assert.equal(ui.get("quota-badge").textContent, "查询失败");
+  await ui.api.poll();
+  assert.equal(quotaReads(ui), 1);
+
+  failGet = false;
+  ui.get("tab-btn-setup").onclick();
+  ui.get("tab-btn-monitor").onclick();
+  await flushRequests();
+  assert.equal(ui.requests.length, 1);
+  status = {...base(), login: {state: "waiting", busy: true}};
+  await ui.api.poll();
+  releasePost(quotaSample("旧账号"));
+  await flushRequests();
+  assert.ok(!quotaHasGroup(ui, "旧账号"));
+  assert.equal(ui.get("quota-refresh").disabled, true);
+
+  status = base();
+  await ui.api.poll();
+  await flushRequests();
+  assert.equal(ui.requests.length, 2);
+  releasePost(quotaSample("新账号"));
+  await flushRequests();
+  assert.ok(quotaHasGroup(ui, "新账号"));
 });
 
 test("daily heatmap distinguishes empty days, zero usage, and unknown tokens, supports local metric/model filters and range switching", async () => {

@@ -105,8 +105,9 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
   0.7.2 另对 [#19](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/19) 的 Safe Mode 第 4 条规则实施结构锚定的等义改写，保留安全约束（实机已验收：不再出现该伪 429）；详见 [CHANGELOG](CHANGELOG.md)。
 - **只读诊断与统计指令**：
   - `/agy doctor`：进行无损连通性与会话自检。
-  - `/agy cost`：查看各实例只读缓存复用、近 24 小时 Token 统计与进程池摘要（不发任何模型请求）。
+  - `/agy cost` 查看各实例近 24 小时的缓存复用、Token 与进程池摘要。已结算的脱敏统计可跨插件重载恢复。
   - `/agy quota` 手动查询官方 CLI 账号额度，`/agy usage [30|90|365]` 查看本地每日用量，`/agy help` 列出全部指令。
+  - 进入运行监控时按需更新账号额度，60 秒内优先使用缓存。也可点击「刷新额度」立即查询。
   - QQ 私聊中 `/new` 正常、`/agy cost` 被当成聊天时，请在该会话实际使用的 AstrBot 配置「可用插件」中勾选 `astrbot_plugin_antigravity_acp` 并保存，再发 `/agy help`。
 - **同一会话连续出现 `history_rewrite`**：升级至含 #33 修复的 v0.8.2 后，在同一会话连续发送消息，检查后续轮是否显示 `reused=true`。真实历史编辑等情况仍会触发重建。详情见 [会话复用排障](docs/troubleshooting.md#会话复用与历史重写)。
 

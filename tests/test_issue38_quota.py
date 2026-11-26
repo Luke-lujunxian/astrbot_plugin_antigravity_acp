@@ -109,6 +109,35 @@ class QuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["capability"], "unsupported")
         self.query.assert_not_awaited()
 
+    async def test_automatic_failure_cooldown_and_manual_retry(self):
+        self.query.side_effect = AgyError("AUTH", "private")
+        first = await self.service.refresh()
+        self.assertEqual(await self.service.refresh(), first)
+        self.query.assert_awaited_once()
+        self.query.side_effect = None
+        self.assertEqual((await self.service.refresh(force=True))["groups"], self.groups)
+        self.assertEqual(self.query.await_count, 2)
+
+    async def test_transient_failure_expires_and_environment_change_clears_definite_error(self):
+        self.query.side_effect = AgyError("QUOTA_FAILED", "private")
+        failed = await self.service.refresh()
+        self.assertEqual(await self.service.refresh(), failed)
+        self.query.assert_awaited_once()
+        self.service.retry_after -= 61
+        self.query.side_effect = None
+        self.assertFalse((await self.service.refresh())["stale"])
+        self.assertEqual(self.query.await_count, 2)
+
+        self.version.return_value = "1.5.2"
+        unsupported = await self.service.refresh(force=True)
+        self.service.retry_after -= 61
+        self.assertEqual(await self.service.refresh(), unsupported)
+        self.assertEqual(self.version.await_count, 3)
+        self.environment.return_value = (("new login",), True)
+        self.version.return_value = "1.5.17"
+        self.assertEqual((await self.service.refresh())["groups"], self.groups)
+        self.assertEqual(self.version.await_count, 4)
+
 
 class QuotaChildTests(unittest.IsolatedAsyncioTestCase):
     async def child(self, script):

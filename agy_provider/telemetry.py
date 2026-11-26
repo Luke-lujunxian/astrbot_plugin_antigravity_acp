@@ -1,4 +1,4 @@
-"""Structured turn cost/rebuild telemetry and bounded in-memory /agy cost stats."""
+"""Structured turn cost, rebuild telemetry, and bounded /agy cost stats."""
 
 from __future__ import annotations
 
@@ -19,11 +19,10 @@ from astrbot.api import logger
 
 from .daily_usage import DailyUsage
 from .failure_events import FailureJournal, STOP_REASONS, event_fields, MAX_BYTES, MAX_EVENTS, TTL
+from .turn_history import HISTORY_TTL_SECONDS, MAX_HISTORY_TURNS, TurnHistory
 
-MAX_HISTORY_TURNS = 100
 MAX_TOMBSTONES = 1024
 TOMBSTONE_TTL_SECONDS = 3600
-HISTORY_TTL_SECONDS = 86400
 
 REBUILD_REASON_PRIORITY = (
     "no_identity",
@@ -73,19 +72,24 @@ IMAGE_TIMEOUT IMAGE_URL IMAGES_DISABLED HOST ROUTE_MISMATCH REFERENCE_BLOCKED
 
 _journal = None
 _daily = None
+_turn_history = None
 _last_service = (None, None)
 
 
 def start_diagnostics(root):
-    global _journal, _daily, _last_service
+    global _journal, _daily, _turn_history, _last_service
     stop_diagnostics()
     _last_service = (None, None)
     _journal = FailureJournal(root, MONITOR_ERROR_CODES)
     _daily = DailyUsage(root)
+    _turn_history = TurnHistory(root)
 
 
 def stop_diagnostics():
-    global _journal, _daily
+    global _journal, _daily, _turn_history
+    if _turn_history is not None:
+        _turn_history.close()
+        _turn_history = None
     if _daily is not None:
         _daily.close()
         _daily = None
@@ -151,6 +155,46 @@ def pick_primary_reason(reasons: list[str]) -> str | None:
 
 def _valid_nonneg_int(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
+
+
+def _history_stats(record: dict) -> dict:
+    """Keep only the fields needed for statistics. Apply the same projection on read."""
+    def choice(key, values, default=None):
+        value = record.get(key)
+        return value if isinstance(value, str) and value in values else default
+
+    def model_id(key):
+        value = record.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.+/-]{0,191}", value):
+            return value
+        return None
+
+    reasons = record.get("rebuild_reasons")
+    cache = record.get("cache_fields_present")
+    counts = {}
+    for key in ("elapsed_ms", "input_other", "input_cached", "output", "prompt_bytes",
+                "replay_bytes", "omitted_messages"):
+        value = record.get(key)
+        counts[key] = value if type(value) is int and 0 <= value < 2**53 else None
+    return {
+        "model": model_id("model") or "",
+        "negotiated_model": model_id("negotiated_model"),
+        "mode": choice("mode", {"chat", "tools"}, "unknown"),
+        "status": choice("status", {"ok", "error", "cancelled", "short_circuited"}, "unknown"),
+        "error_code": choice("error_code", MONITOR_ERROR_CODES, "UPSTREAM" if record.get("error_code") else None),
+        "usage_status": choice("usage_status", {"reported", "unavailable", "not_sent"}, "unavailable"),
+        "request_sent": record.get("request_sent") is True,
+        "reused": record.get("reused") is True,
+        "stable_identity": record.get("stable_identity") is True,
+        "upstream_compaction_detected": record.get("upstream_compaction_detected") is True,
+        "fast_abort_reason": record.get("fast_abort_reason") is True,
+        "rebuild_reasons": [r for r in REBUILD_REASON_PRIORITY if isinstance(reasons, list) and r in reasons],
+        "cache_fields_present": {
+            key: isinstance(cache, dict) and cache.get(key) is True
+            for key in ("cachedReadTokens", "cachedWriteTokens")
+        },
+        **counts,
+    }
 
 
 def extract_acp_usage(
@@ -499,6 +543,27 @@ class TelemetryTracker:
         self.evictions: dict[str, int] = {}
         self.emitted_lines: deque[str] = deque(maxlen=MAX_HISTORY_TURNS)
         self._emitted_times: deque[float] = deque(maxlen=MAX_HISTORY_TURNS)
+        self._history_store = None
+        self._history_tag = None
+
+    def restore_history(self, tag: str | None) -> None:
+        if tag is None or _turn_history is None:
+            return
+        self._history_store = _turn_history
+        self._history_tag = tag
+        now = time.time()
+        monotonic_now = self.clock()
+        for stamp, stats in self._history_store.load(tag, now):
+            if isinstance(stats, dict):
+                self.history.append({
+                    **_history_stats(stats), "historical": True,
+                    "recorded_at": datetime.fromtimestamp(stamp, timezone.utc).isoformat(),
+                })
+                self._history_times.append(monotonic_now - (now - stamp))
+
+    @property
+    def history_storage(self) -> str:
+        return "available" if self._history_store is not None and self._history_store.db is not None else "memory_only"
 
     def opaque_tag(self, value: str | None) -> str | None:
         if not value:
@@ -537,7 +602,8 @@ class TelemetryTracker:
 
     def record_turn(self, record: dict) -> None:
         self._prune_history()
-        record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+        stamp = time.time()
+        record["recorded_at"] = datetime.fromtimestamp(stamp, timezone.utc).isoformat()
         if _daily is not None:
             _daily.record(record)
         global _last_service
@@ -547,6 +613,15 @@ class TelemetryTracker:
             _journal.append(record)
         self.history.append(record)
         self._history_times.append(self.clock())
+        sample = record.get("turn_id")
+        if (self.history_storage == "available" and isinstance(sample, str)
+                and re.fullmatch(r"[0-9a-f]{16}", sample)):
+            stats = _history_stats({
+                **record, "stable_identity": record.get("session_key") is not None,
+                "fast_abort_reason": bool(record.get("fast_abort_reason")),
+            })
+            anonymous_sample = hmac.digest(bytes.fromhex(self._history_tag), sample.encode(), "sha256").hex()[:32]
+            self._history_store.record(self._history_tag, anonymous_sample, stamp, stats)
         if self.cost_log_enabled:
             line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
             self.emitted_lines.append(line)
@@ -576,6 +651,8 @@ class TelemetryTracker:
                 **safe_context(record), **event_fields(record),
                 "negotiated_model": safe_label(record.get("negotiated_model")) or None,
             }
+            if record.get("historical"):
+                row["historical"] = True
             for key in ("elapsed_ms", "input_other", "input_cached", "output", "prompt_bytes", "replay_bytes", "omitted_messages"):
                 row[key] = _valid_nonneg_int(record.get(key))
             candidate = record.get("content_429_candidate")
@@ -672,7 +749,7 @@ class TelemetryTracker:
         candidates = [
             t
             for t in sent_turns
-            if t["session_key"] is not None
+            if t.get("stable_identity", t.get("session_key") is not None)
             and "cold_start" not in t["rebuild_reasons"]
             and "no_identity" not in t["rebuild_reasons"]
         ]
@@ -699,6 +776,7 @@ class TelemetryTracker:
         failed_other = sum(t["input_other"] or 0 for t in failed_reported)
         failed_cached = sum(t["input_cached"] or 0 for t in failed_reported)
         failed_output = sum(t["output"] or 0 for t in failed_reported)
+        known_input_other = [t["input_other"] for t in reported if t["input_other"] is not None]
 
         reason_counts: dict[str, int] = {}
         for t in turns:
@@ -753,8 +831,8 @@ class TelemetryTracker:
                 (checked_cached / checked_total) if checked_total > 0 else None
             ),
             "median_input_other": (
-                int(statistics.median(t["input_other"] for t in reported))
-                if reported
+                int(statistics.median(known_input_other))
+                if known_input_other
                 else None
             ),
             "median_total_input": (

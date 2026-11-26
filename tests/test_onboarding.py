@@ -424,6 +424,29 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("quota-refresh"))["data"], {"groups": []})
         self.service.quota.refresh.assert_awaited_once_with(force=True)
 
+    async def test_registered_on_demand_quota_route_requires_strict_booleans(self):
+        self.service.register()
+        route, handler, methods, _ = next(
+            row for row in self.context.registered_web_apis if row[0].endswith("/setup/quota-refresh")
+        )
+        self.assertTrue(route.startswith("/astrbot_plugin_antigravity_acp/"))
+        self.assertEqual(methods, ["POST"])
+        self.service.quota.refresh = AsyncMock(return_value={"groups": []})
+        self.request.body = AsyncMock(return_value=b"{}")
+        self.request.json = AsyncMock()
+        csrf = self.service.csrf
+        for force in (None, 0, 1, "false", [], {}):
+            self.request.json.return_value = {"csrf": csrf, "force": force}
+            self.assert_web_error(await handler(), 400, "CONFIG")
+        self.request.json.return_value = {"csrf": "expired", "force": False}
+        self.assert_web_error(await handler(), 403, "CSRF_EXPIRED")
+        self.request.json.return_value = {"csrf": csrf, "force": False}
+        with patch.object(type(self.service.login), "busy", True):
+            self.assert_web_error(await handler(), 409, "LOGIN_BUSY")
+        self.service.quota.refresh.assert_not_awaited()
+        self.assertEqual((await handler())["data"], {"groups": []})
+        self.service.quota.refresh.assert_awaited_once_with(force=False)
+
     async def test_quota_refresh_distinguishes_login_busy_and_close_race(self):
         self.service.quota.refresh = AsyncMock(side_effect=AgyError("CLOSED", "插件已停用。"))
         with patch.object(type(self.service.login), "busy", True):
@@ -591,12 +614,25 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.creates, 1)
 
     async def test_ensure_provider_source_idempotent(self):
+        self.manager.providers_config.append({"id": "legacy", "type": "agy_acp", "model": "gemini-test"})
         first = await ensure_provider_source(self.manager)
+        marker = self.manager.persisted[0]["agy_history_id"]
         second = await ensure_provider_source(self.manager)
         self.assertEqual(first, "agy_acp")
         self.assertEqual(second, "agy_acp")
+        self.assertRegex(marker, r"^[0-9a-f]{32}$")
+        self.assertEqual(self.manager.persisted[0]["agy_history_id"], marker)
         self.assertEqual(len(self.manager.persisted_sources), 1)
         self.assertEqual(len(self.manager.provider_sources_config), 1)
+
+    async def test_recreated_model_gets_new_history_identity(self):
+        await self.apply()
+        old = self.manager.providers_config[0]
+        await self.service._manage("provider-delete", old["id"], migrate_default_to="", force_confirm=True)
+        await self.apply()
+        new = self.manager.providers_config[0]
+        self.assertEqual(new["id"], old["id"])
+        self.assertNotEqual(new["agy_history_id"], old["agy_history_id"])
 
     async def test_ensure_provider_source_preserves_other_sources_and_displaces_collision(self):
         other_same_id = {
