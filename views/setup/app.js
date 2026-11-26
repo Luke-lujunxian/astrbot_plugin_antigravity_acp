@@ -69,6 +69,7 @@ const quotaWindowLabels = {
 const toolPolicyChoiceLabels = {
   deny: "拒绝",
   allow_once: "单次允许",
+  allow: "允许",
 };
 
 const toolRiskLabels = {
@@ -79,6 +80,7 @@ const toolRiskLabels = {
 
 const toolCapabilityLabels = {
   supported: {text: "支持", state: "ready"},
+  experimental: {text: "实验性", state: "warn"},
   unverified: {text: "未验证", state: "warn"},
   unsupported: {text: "暂不支持", state: ""},
 };
@@ -90,7 +92,7 @@ const toolSourceSections = {
   },
   builtin: {
     title: "AGY CLI 内置工具",
-    desc: "默认全部拒绝；仅后端确认支持的内置工具可切换为单次允许，并与 MCP 共用每轮调用上限。",
+    desc: "默认全部关闭；仅已支持或实验性工具可在本页调整，调用会计入每轮工具调用次数。",
   },
 };
 
@@ -346,9 +348,68 @@ function kvItem(label, value) {
   return item;
 }
 
+const AGY_ERROR_PREFIX = /^\[AGY:([A-Z][A-Z0-9_]*)\] /;
+
+function parseBridgeError(error) {
+  const rawMessage = typeof error?.message === "string" ? error.message : "";
+  const match = AGY_ERROR_PREFIX.exec(rawMessage);
+  let code = "";
+  let message = rawMessage;
+  if (match) {
+    code = match[1];
+    message = rawMessage.slice(match[0].length);
+  } else if (typeof error?.data?.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(error.data.code)) {
+    code = error.data.code;
+  } else if (typeof error?.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(error.code)) {
+    code = error.code;
+  }
+  const rawStatus = error?.status ?? error?.statusCode ?? error?.status_code;
+  const status = Number.isInteger(rawStatus) ? rawStatus : null;
+  return {code, message: message.trim(), rawMessage, status};
+}
+
 function isAuthDeniedError(error) {
-  const status = error?.status || error?.statusCode || error?.status_code;
-  return status === 401 || status === 403 || /登录|权限|管理员|unauthorized|forbidden/i.test(error?.message || "");
+  const parsed = parseBridgeError(error);
+  if (parsed.code) {
+    return parsed.code === "UNAUTHENTICATED" || parsed.code === "FORBIDDEN";
+  }
+  if (parsed.status !== null) {
+    return parsed.status === 401 || parsed.status === 403;
+  }
+  return /登录|权限|管理员|unauthorized|forbidden/i.test(parsed.message);
+}
+
+function formatPanelError(error, fallback = "请求失败，请稍后重试。") {
+  const parsed = parseBridgeError(error);
+  switch (parsed.code) {
+    case "UNAUTHENTICATED":
+      return "无权访问或登录已过期，请使用 AstrBot 管理员账号重新登录。";
+    case "FORBIDDEN":
+      return "无权执行此操作，请确认当前账号为 AstrBot 面板管理员。";
+    case "CSRF_EXPIRED":
+      return "页面已过期，请刷新页面后重试。";
+    case "LOGIN_BUSY":
+      return "官方登录正在进行中，请等待登录完成后再试。";
+    case "BUSY":
+      return "检测、登录或保存正在进行中，请稍后再试。";
+    case "CLOSED":
+      return "插件已停用，请启用或刷新页面后再试。";
+    case "STORAGE_UNAVAILABLE":
+      return "本地统计存储暂不可用，请稍后再试。";
+    case "QUOTA_UNAVAILABLE":
+      return "额度服务暂不可用，请稍后再试。";
+    case "CONFIG":
+    case "UNSUPPORTED":
+    case "INTERNAL":
+      return parsed.message || fallback;
+    default:
+      if (parsed.code) return parsed.message || fallback;
+  }
+  if (parsed.status === 401) return "无权访问或登录已过期，请使用 AstrBot 管理员账号重新登录。";
+  if (parsed.status === 403) return "无权执行此操作或页面已过期，请刷新页面或重新登录后重试。";
+  if (parsed.status === 409) return "操作冲突或登录正在进行中，请稍后再试。";
+  if (parsed.status === 503) return "插件已停用或服务暂不可用，请稍后再试。";
+  return parsed.message || fallback;
 }
 
 // 仅认定最新一轮未恢复且非取消的异常为「当前故障」；历史故障和 CANCELLED 不常驻提示
@@ -997,12 +1058,30 @@ async function refreshQuotaCache() {
       if (!quotaSnapshot) renderQuota();
       return;
     }
-    const status = error?.status || error?.statusCode || error?.status_code;
-    quotaRequestError = isAuthDeniedError(error)
-      ? "无权读取账号额度，请使用 AstrBot 管理员账号登录后重试。"
-      : status === 503
-        ? "插件当前已停用或服务不可用（503），请确认插件已启用后重试。"
-        : "暂时无法读取额度缓存，请点击「刷新额度」重试。";
+    const parsed = parseBridgeError(error);
+    if (isAuthDeniedError(error)) {
+      quotaRequestError = parsed.code === "UNAUTHENTICATED"
+        ? "无权读取账号额度或登录已过期，请重新登录后重试。"
+        : "无权读取账号额度，请使用 AstrBot 管理员账号登录后重试。";
+    } else if (parsed.code === "CLOSED") {
+      quotaRequestError = "插件已停用，请确认插件已启用后重试。";
+    } else if (parsed.code === "QUOTA_UNAVAILABLE") {
+      quotaRequestError = "额度服务暂不可用，请稍后再试。";
+    } else if (parsed.code === "STORAGE_UNAVAILABLE") {
+      quotaRequestError = "本地统计暂不可用，请稍后再试。";
+    } else if (parsed.code === "CSRF_EXPIRED") {
+      quotaRequestError = "页面已过期，请刷新页面后重试。";
+    } else if (parsed.code === "LOGIN_BUSY") {
+      quotaRequestError = "官方登录正在进行中，请等待登录完成后再刷新额度。";
+    } else if (parsed.code === "BUSY") {
+      quotaRequestError = "其他操作正在进行中，请稍后再试。";
+    } else if (!parsed.code && parsed.status === 503) {
+      quotaRequestError = "插件当前已停用或服务不可用（503），请确认插件已启用后重试。";
+    } else if (!parsed.code && parsed.status === 409) {
+      quotaRequestError = "官方登录正在进行中，请等待登录完成后再刷新额度。";
+    } else {
+      quotaRequestError = "暂时无法读取额度缓存，请点击「刷新额度」重试。";
+    }
     renderQuota();
   }
 }
@@ -1021,14 +1100,30 @@ async function refreshQuotaManual() {
   } catch (error) {
     if (disposed || epoch !== refreshEpoch) return;
     quotaLoading = false;
-    const status = error?.status || error?.statusCode || error?.status_code;
-    quotaRequestError = isAuthDeniedError(error)
-      ? "无权刷新账号额度或会话已过期，请重新登录后重试。"
-      : status === 409
-        ? "官方登录正在进行中，请等待登录完成后再刷新额度。"
-        : status === 503
-          ? "插件当前已停用（503），请启用插件后再刷新额度。"
-          : "额度刷新请求失败，请稍后重试。";
+    const parsed = parseBridgeError(error);
+    if (isAuthDeniedError(error)) {
+      quotaRequestError = "无权刷新账号额度或登录已过期，请重新登录后重试。";
+    } else if (parsed.code === "CSRF_EXPIRED") {
+      quotaRequestError = "页面已过期，请刷新页面后再试。";
+    } else if (parsed.code === "LOGIN_BUSY") {
+      quotaRequestError = "官方登录正在进行中，请等待登录完成后再刷新额度。";
+    } else if (parsed.code === "BUSY") {
+      quotaRequestError = "其他操作正在进行中，请稍后再试。";
+    } else if (parsed.code === "CLOSED") {
+      quotaRequestError = "插件已停用，请启用插件后再刷新额度。";
+    } else if (parsed.code === "QUOTA_UNAVAILABLE") {
+      quotaRequestError = "额度服务暂不可用，请稍后再试。";
+    } else if (parsed.code === "STORAGE_UNAVAILABLE") {
+      quotaRequestError = "本地统计暂不可用，请稍后再试。";
+    } else if (parsed.code === "CONFIG" || parsed.code === "UNSUPPORTED") {
+      quotaRequestError = parsed.message || "当前操作不被允许，请刷新页面后重试。";
+    } else if (!parsed.code && parsed.status === 409) {
+      quotaRequestError = "官方登录正在进行中，请等待登录完成后再刷新额度。";
+    } else if (!parsed.code && parsed.status === 503) {
+      quotaRequestError = "插件当前已停用（503），请启用插件后再刷新额度。";
+    } else {
+      quotaRequestError = "额度刷新请求失败，请稍后重试。";
+    }
     renderQuota();
   }
 }
@@ -1469,12 +1564,22 @@ async function loadDailyUsage(days = dailyDays) {
       renderDaily();
       return;
     }
-    const status = error?.status || error?.statusCode || error?.status_code;
-    dailyError = isAuthDeniedError(error)
-      ? "无权读取每日统计，请使用 AstrBot 管理员账号登录后重试。"
-      : status === 503
-        ? "本地统计存储当前不可用（503），请检查插件数据目录权限或磁盘空间后重试。"
-        : "每日统计读取失败，请稍后重试。";
+    const parsed = parseBridgeError(error);
+    if (isAuthDeniedError(error)) {
+      dailyError = "无权读取每日统计或登录已过期，请使用 AstrBot 管理员账号登录后重试。";
+    } else if (parsed.code === "CLOSED") {
+      dailyError = "插件已停用，请启用插件后重试。";
+    } else if (parsed.code === "STORAGE_UNAVAILABLE") {
+      dailyError = "本地统计暂不可用，请检查插件数据目录权限或磁盘空间后稍后再试。";
+    } else if (parsed.code === "CSRF_EXPIRED") {
+      dailyError = "页面已过期，请刷新页面后重试。";
+    } else if (parsed.code === "LOGIN_BUSY" || parsed.code === "BUSY") {
+      dailyError = "操作正在进行中，请稍后再试。";
+    } else if (!parsed.code && parsed.status === 503) {
+      dailyError = "本地统计存储当前不可用（503），请检查插件数据目录权限或磁盘空间后重试。";
+    } else {
+      dailyError = "每日统计读取失败，请稍后重试。";
+    }
     renderDaily();
   }
 }
@@ -1484,10 +1589,32 @@ async function loadDailyUsage(days = dailyDays) {
 function isToolEditable(tool) {
   return Boolean(
     tool
-    && tool.capability === "supported"
+    && (tool.capability === "supported" || tool.capability === "experimental")
     && Array.isArray(tool.choices)
     && tool.choices.length > 1
   );
+}
+
+function isBinaryAllowSwitch(tool) {
+  return Boolean(
+    isToolEditable(tool)
+    && tool.choices.length === 2
+    && tool.choices.includes("deny")
+    && tool.choices.includes("allow")
+  );
+}
+
+function isToolReloadRequired(tool, policy) {
+  if (typeof tool?.reload_required === "boolean") return tool.reload_required;
+  if (!policy?.reload_required) return false;
+  return (tool?.effective === true && tool?.policy === "deny")
+    || (tool?.effective === false && Boolean(tool?.policy) && tool?.policy !== "deny");
+}
+
+function formatPendingTargetLabel(policyValue, isSwitch) {
+  if (policyValue === "deny") return "关闭";
+  if (policyValue === "allow") return isSwitch ? "开启" : "允许";
+  return toolPolicyChoiceLabels[policyValue] || policyValue || "变更";
 }
 
 function recomputeToolPolicyDirty() {
@@ -1640,17 +1767,27 @@ function renderToolPolicy() {
         titleRow.append(capBadge);
       }
 
-      // 生效状态徽标
+      // 生效状态徽标（逐行感知 reload_required，避免高风险关闭待重载仍显示绿色「当前生效」）
+      const isSwitch = isBinaryAllowSwitch(tool);
+      const rowReloadRequired = isToolReloadRequired(tool, policy);
       let effText = "状态未知", effState = "";
       if (masterKnown && !masterEnabled) {
         effText = "未生效（总闸关闭）";
         effState = "";
+      } else if (rowReloadRequired) {
+        const currentStateText = tool.effective === true ? "当前生效" : tool.effective === false ? "当前未生效" : "待重载";
+        const nextStateText = formatPendingTargetLabel(tool.policy, isSwitch);
+        effText = `${currentStateText} · 重载后${nextStateText}`;
+        effState = "warn";
       } else if (tool.effective === true) {
         effText = "当前生效";
         effState = "ready";
       } else if (tool.effective === false) {
-        effText = policy.reload_required && tool.policy === "allow_once" ? "重载后生效" : "未生效";
-        effState = policy.reload_required && tool.policy === "allow_once" ? "warn" : "";
+        effText = "未生效";
+        effState = "";
+      }
+      if (rowReloadRequired && (!masterKnown || masterEnabled)) {
+        row.dataset.reloadPending = "true";
       }
       const effBadge = el("span", "badge", effText);
       if (effState) effBadge.dataset.state = effState;
@@ -1667,12 +1804,33 @@ function renderToolPolicy() {
         info.append(el("p", "small", "工具列表由宿主每轮快照决定，执行仍由宿主审批与隔离。"));
       }
 
-      // 策略控件：仅 capability === "supported" 且 choices.length > 1 时渲染可切换控件
+      // 策略控件：由 capability 与 choices 驱动；二元 deny/allow 渲染独立开关，其余渲染分段切换
       const controlWrap = el("div", "tool-row-control");
       const editable = isToolEditable(tool);
       const currentVal = editable ? (toolPolicyDraft[tool.id] ?? tool.policy) : tool.policy;
 
-      if (editable) {
+      if (isSwitch) {
+        const isOn = currentVal === "allow";
+        const wrap = el("div", "tool-switch-wrap");
+        const stateText = el("span", isOn ? "tool-switch-state is-on" : "tool-switch-state", isOn ? "开启" : "关闭");
+        const sw = el("button", "tool-switch");
+        sw.type = "button";
+        sw.setAttribute("role", "switch");
+        sw.setAttribute("aria-checked", String(isOn));
+        sw.setAttribute("aria-label", `${tool.purpose || tool.id}开关`);
+        sw.disabled = toolPolicySaving || busy;
+        const thumb = el("span", "tool-switch-thumb");
+        thumb.setAttribute("aria-hidden", "true");
+        sw.append(thumb);
+        sw.addEventListener("click", () => {
+          toolPolicyDraft[tool.id] = isOn ? "deny" : "allow";
+          recomputeToolPolicyDirty();
+          if (toolPolicyFeedback.kind === "ok") toolPolicyFeedback = {message: "", kind: ""};
+          renderToolPolicy();
+        });
+        wrap.append(stateText, sw);
+        controlWrap.append(wrap);
+      } else if (editable) {
         const seg = el("div", "seg-group");
         seg.setAttribute("role", "group");
         seg.setAttribute("aria-label", `${tool.purpose || tool.id} 策略`);
@@ -1703,8 +1861,19 @@ function renderToolPolicy() {
       top.append(info, controlWrap);
       row.append(top);
 
-      // 高风险警示
-      if (tool.risk === "high" && (editable || currentVal === "allow_once")) {
+      // 限制与风险提示（完全由后端能力与风险字段驱动，如实说明事后拦截边界）
+      const isPostObservation = tool.pre_execution_approval === false || tool.enforcement === "post_observation";
+      const limitationText = typeof tool.limitation === "string" ? tool.limitation.trim() : "";
+      if (isPostObservation && tool.risk === "network") {
+        const noteText = currentVal === "allow"
+          ? "实验性提示：这是事后拦截，开启后搜索由 CLI 自动触发、不会逐次询问确认；搜索会计入本轮工具调用次数，超出后会尽量中止后续调用，已发出的请求无法撤回。关闭时也仅靠提示模型并在发现后中止，不能保证百分之百拦住。"
+          : "实验性限制：这是事后拦截，无法在搜索发出前拦住，发现时请求可能已经发出；关闭时靠提示模型不要搜索并在发现后中止本轮，不能保证百分之百拦住。开启后搜索会计入本轮工具调用次数，超出后会尽量中止后续调用。";
+        row.append(el("div", "tool-risk-note", noteText));
+      } else if (limitationText) {
+        row.append(el("div", "tool-risk-note", limitationText));
+      } else if (isPostObservation) {
+        row.append(el("div", "tool-risk-note", "实验性限制：此项为事后拦截，发现时操作可能已经执行，无法在执行前拦住。"));
+      } else if (tool.risk === "high" && (editable || currentVal === "allow_once")) {
         const warnText = currentVal === "allow_once"
           ? "高风险警示：单次允许仅绑定当前轮 ACP 请求，并与宿主 MCP 共用调用次数上限；仍建议仅在受控工作区按需启用。"
           : "高风险内置工具：默认拒绝；开启单次允许前请确认了解其访问范围。";
@@ -1728,8 +1897,11 @@ async function saveToolPolicy() {
   let count = 0;
   for (const tool of tools) {
     if (isToolEditable(tool)) {
-      payload[tool.id] = toolPolicyDraft[tool.id] ?? tool.policy;
-      count++;
+      const nextVal = toolPolicyDraft[tool.id] ?? tool.policy;
+      if (nextVal !== tool.policy) {
+        payload[tool.id] = nextVal;
+        count++;
+      }
     }
   }
   if (!count) return;
@@ -1762,10 +1934,27 @@ async function saveToolPolicy() {
     if (disposed) return;
     toolPolicySaving = false;
     // 保存失败：严格保留 toolPolicyDraft 与 toolPolicyDirty，不丢失用户编辑内容
-    const status = error?.status || error?.statusCode || error?.status_code;
-    const msg = status === 403
-      ? "保存失败：登录态或安全令牌已过期，请刷新页面后重试（已保留当前编辑内容）。"
-      : `${error?.message || "保存工具策略失败"}（已保留当前编辑内容，可修正后重试）`;
+    const parsed = parseBridgeError(error);
+    let msg;
+    if (parsed.code === "CSRF_EXPIRED") {
+      msg = "页面已过期，请刷新页面后重试（已保留当前编辑内容）。";
+    } else if (isAuthDeniedError(error)) {
+      msg = parsed.code === "FORBIDDEN"
+        ? "无权修改工具策略，请确认当前账号为 AstrBot 面板管理员（已保留当前编辑内容）。"
+        : !parsed.code && parsed.status === 403
+          ? "保存失败：登录态或安全令牌已过期，请刷新页面后重试（已保留当前编辑内容）。"
+          : "无权修改工具策略或登录已过期，请重新登录后重试（已保留当前编辑内容）。";
+    } else if (parsed.code === "CLOSED" || (!parsed.code && parsed.status === 503)) {
+      msg = "插件已停用，无法保存策略，请启用插件后重试（已保留当前编辑内容）。";
+    } else if (parsed.code === "LOGIN_BUSY") {
+      msg = "官方登录正在进行中，请等待登录完成后再保存（已保留当前编辑内容）。";
+    } else if (parsed.code === "BUSY" || (!parsed.code && parsed.status === 409)) {
+      msg = "其他操作正在进行中，请稍后再试（已保留当前编辑内容）。";
+    } else if (parsed.code === "STORAGE_UNAVAILABLE") {
+      msg = "本地统计暂不可用，请稍后再试（已保留当前编辑内容）。";
+    } else {
+      msg = `${parsed.message || "保存工具策略失败"}（已保留当前编辑内容，可修正后重试）`;
+    }
     toolPolicyFeedback = {message: msg, kind: "error"};
     renderToolPolicy();
   }
@@ -1843,17 +2032,22 @@ async function refreshMonitor() {
     if (!disposed && epoch === refreshEpoch) renderMonitor(data);
   } catch (error) {
     if (disposed || epoch !== refreshEpoch) return;
+    const parsed = parseBridgeError(error);
     const denied = isAuthDeniedError(error);
     $("monitor").dataset.stale = "true";
     badge("monitor-badge", "数据过期", "error");
-    $("monitor-message").textContent = denied
-      ? "无权读取监控，请使用 AstrBot 管理员账号登录后刷新。"
-      : monitorSnapshot ? "监控读取失败，以下为过期快照。" : "暂时无法读取监控数据，请稍后刷新。";
     if (denied) {
+      $("monitor-message").textContent = "无权读取监控或登录已过期，请使用 AstrBot 管理员账号登录后刷新。";
       $("monitor-instances").replaceChildren();
       monitorSnapshot = undefined;
       monitorSignature = undefined;
       renderRouting(null);
+    } else if (parsed.code === "CLOSED" || (!parsed.code && parsed.status === 503)) {
+      $("monitor-message").textContent = "插件已停用，请启用插件后刷新。";
+    } else if (parsed.code === "CSRF_EXPIRED") {
+      $("monitor-message").textContent = "页面已过期，请刷新页面后重试。";
+    } else {
+      $("monitor-message").textContent = monitorSnapshot ? "监控读取失败，以下为过期快照。" : "暂时无法读取监控数据，请稍后刷新。";
     }
   } finally {
     if (!disposed && epoch === refreshEpoch) {
@@ -1994,7 +2188,7 @@ async function openImpactModal(providerId, op) {
     btn.textContent = op === "delete" ? "确认删除" : "确认停用";
     $("modal-impact").hidden = false;
   } catch (error) {
-    showError(error?.message || "读取影响范围失败。");
+    showError(formatPanelError(error, "读取影响范围失败。"));
   }
 }
 
@@ -2216,7 +2410,7 @@ async function action(name, body = {}) {
     if (!data.busy && monitorReady) refreshMonitor();
   } catch (error) {
     if (disposed) return;
-    pending = false; render(state); showError(error?.message || "请求失败，请刷新页面。");
+    pending = false; render(state); showError(formatPanelError(error, "请求失败，请刷新页面。"));
   }
 }
 
@@ -2329,7 +2523,7 @@ async function poll() {
     if (!disposed && epoch === refreshEpoch && currentRevision === revision) {
       pollFailures = Math.min(pollFailures + 1, 4);
       setConnection("连接中断，正在重试…", "error");
-      showError(error?.message || "无法读取状态。", "poll");
+      showError(formatPanelError(error, "无法读取状态。"), "poll");
     }
   } finally {
     if (!disposed && epoch === refreshEpoch) {
@@ -2404,7 +2598,7 @@ if (!bridge) {
     }
   } catch (error) {
     setConnection("面板连接失败", "error");
-    showError(error.message || "面板连接失败。");
+    showError(formatPanelError(error, "面板连接失败。"));
     badge("monitor-badge", "不可用", "error");
     $("monitor-message").textContent = "面板连接失败，请刷新页面。";
   }

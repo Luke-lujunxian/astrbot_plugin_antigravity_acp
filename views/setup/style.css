@@ -1330,6 +1330,10 @@ h2 {
   background: var(--surface-subtle);
 }
 
+.tool-row[data-reload-pending="true"] {
+  border-color: color-mix(in srgb, var(--paused) 45%, var(--border));
+}
+
 .tool-row-top {
   display: flex;
   align-items: flex-start;
@@ -1358,6 +1362,61 @@ h2 {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.tool-switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-switch-state {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.tool-switch-state.is-on {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tool-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 42px;
+  height: 24px;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--track);
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.tool-switch:hover:enabled {
+  border-color: var(--subtle);
+}
+
+.tool-switch[aria-checked="true"] {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.tool-switch-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  transition: transform 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+
+.tool-switch[aria-checked="true"] .tool-switch-thumb {
+  transform: translateX(18px);
+  background: var(--on-primary);
+  border-color: transparent;
 }
 
 .policy-readonly {
@@ -1977,6 +2036,8 @@ code {
   .quota-group,
   .quota-bucket,
   .tool-row,
+  .tool-switch,
+  .tool-switch-thumb,
   .hm-cell,
   .hm-swatch {
     border: 1px solid CanvasText;

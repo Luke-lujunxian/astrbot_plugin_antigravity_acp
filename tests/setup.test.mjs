@@ -92,7 +92,7 @@ async function boot(initial = base(), hooks = {}) {
     navigator: {clipboard: {writeText: async () => {throw new Error("iframe clipboard unavailable");}}},
     setTimeout: () => 1, clearTimeout: () => {},
   });
-  const api = await vm.runInContext(`(async () => {${source}\n; return {render, renderMonitor, renderQuota, renderDaily, refreshQuotaManual, loadDailyUsage, saveToolPolicy, action, poll};})()`, context);
+  const api = await vm.runInContext(`(async () => {${source}\n; return {render, renderMonitor, renderQuota, renderDaily, refreshMonitor, refreshQuotaCache, refreshQuotaManual, loadDailyUsage, saveToolPolicy, parseBridgeError, isAuthDeniedError, formatPanelError, action, poll};})()`, context);
   return {api, bridge, requests, getRequests, handlers, doc: context.document, get: id => elements.get(id)};
 }
 
@@ -1083,4 +1083,271 @@ test("admin command help modal opens on demand, lists all 9 contract commands, a
 
   ui.get("commands-close").onclick();
   assert.equal(ui.get("modal-commands").hidden, true);
+});
+
+test("experimental search_web renders independent off-by-default switch, honest post-observation copy, and saves only changed keys", async () => {
+  const searchTool = {
+    id: "search_web",
+    source: "builtin",
+    purpose: "联网搜索",
+    risk: "network",
+    capability: "experimental",
+    choices: ["deny", "allow"],
+    policy: "deny",
+    effective: false,
+    reload_required: false,
+    pre_execution_approval: false,
+    enforcement: "post_observation",
+    limitation: "CLI 自动执行搜索，无法在执行前审批。关闭时由模型护栏和事后中止限制，发现时搜索请求可能已发出。开启后按通知计入预算，超预算时中止本轮。",
+  };
+  const readTool = {
+    id: "read_file",
+    source: "builtin",
+    purpose: "读取隔离工作区顶层文本文件",
+    risk: "high",
+    capability: "supported",
+    choices: ["deny", "allow_once"],
+    policy: "deny",
+    effective: false,
+    reload_required: false,
+  };
+  const data = base();
+  data.tool_policy = {
+    enable_tools: true,
+    reload_required: false,
+    tools: [
+      {id: "astrbot_mcp", source: "mcp", purpose: "宿主提供的工具", risk: "host", capability: "supported", choices: [], policy: "allow_once", effective: true, reload_required: false},
+      readTool,
+      searchTool,
+      {id: "run_command", source: "builtin", purpose: "执行终端命令", risk: "high", capability: "unsupported", choices: ["deny"], policy: "deny", effective: false, reload_required: false},
+    ],
+  };
+  const ui = await boot(data);
+  ui.get("tab-btn-tools").onclick();
+
+  const findRow = (id) => collectNodes(ui.get("tool-policy-list")).find(
+    r => r.className === "tool-row" && collectNodes(r).some(n => n.tag === "code" && n.textContent === id),
+  );
+  const searchRow = findRow("search_web");
+  assert.ok(searchRow);
+  const searchNodes = collectNodes(searchRow);
+  const searchTexts = searchNodes.map(n => n.textContent).filter(Boolean);
+
+  // 实验性徽标 + 默认关闭的独立开关（role="switch"）
+  assert.ok(searchTexts.includes("实验性"));
+  assert.ok(searchTexts.includes("联网风险"));
+  assert.ok(searchTexts.includes("未生效"));
+  const sw = searchNodes.find(n => n.tag === "button" && n.getAttribute("role") === "switch");
+  assert.ok(sw);
+  assert.equal(sw.getAttribute("aria-checked"), "false");
+
+  // 诚实文案：必须说明事后拦截、请求可能已发出、不能保证百分百拦住、计入工具调用次数，且不得包含虚假承诺或技术术语
+  const noteOff = searchNodes.find(n => n.className === "tool-risk-note")?.textContent || "";
+  assert.match(noteOff, /事后拦截/);
+  assert.match(noteOff, /请求可能已经发出/);
+  assert.match(noteOff, /不能保证百分之百/);
+  assert.match(noteOff, /工具调用次数/);
+  for (const forbidden of ["已阻止", "执行前拒绝", "绝对安全", "post_observation", "tool_max_calls"]) {
+    assert.equal(noteOff.includes(forbidden), false, `Search OFF copy must not contain "${forbidden}"`);
+  }
+
+  // 开启开关 → 文案切换仍诚实、不承诺硬上限；保存只提交 search_web
+  sw.click();
+  assert.equal(ui.get("tool-policy-dirty-badge").hidden, false);
+  const searchRowOn = findRow("search_web");
+  const swOn = collectNodes(searchRowOn).find(n => n.tag === "button" && n.getAttribute("role") === "switch");
+  assert.equal(swOn.getAttribute("aria-checked"), "true");
+  const noteOn = collectNodes(searchRowOn).find(n => n.className === "tool-risk-note")?.textContent || "";
+  assert.match(noteOn, /事后拦截/);
+  assert.match(noteOn, /工具调用次数/);
+  assert.match(noteOn, /尽量中止/);
+  assert.match(noteOn, /无法撤回/);
+  for (const forbidden of ["已阻止", "执行前拒绝", "绝对安全", "post_observation", "tool_max_calls"]) {
+    assert.equal(noteOn.includes(forbidden), false, `Search ON copy must not contain "${forbidden}"`);
+  }
+
+  const savedPolicy = {
+    enable_tools: true,
+    reload_required: true,
+    tools: data.tool_policy.tools.map(t => t.id === "search_web" ? {...t, policy: "allow", effective: false, reload_required: true} : t),
+  };
+  ui.bridge.apiPost = async (endpoint, body) => {
+    ui.requests.push({endpoint, body});
+    return savedPolicy;
+  };
+  await ui.api.saveToolPolicy();
+  assert.equal(ui.requests[0].endpoint, "setup/tool-policy");
+  assert.deepEqual({...ui.requests[0].body}, {csrf: "test-nonce", search_web: "allow"});
+
+  // 保存后待重载徽标明确提示「当前未生效 · 重载后开启」
+  const reloadedRow = findRow("search_web");
+  assert.equal(reloadedRow.dataset.reloadPending, "true");
+  const reloadedBadge = collectNodes(reloadedRow).find(n => n.className === "badge" && n.textContent.includes("重载后"));
+  assert.ok(reloadedBadge);
+  assert.equal(reloadedBadge.textContent, "当前未生效 · 重载后开启");
+  assert.equal(reloadedBadge.dataset.state, "warn");
+});
+
+test("pending reload badges clearly distinguish on->off downgrade and off->on upgrade per row", async () => {
+  const data = base();
+  data.tool_policy = {
+    enable_tools: true,
+    reload_required: true,
+    tools: [
+      {id: "astrbot_mcp", source: "mcp", purpose: "宿主提供的工具", risk: "host", capability: "supported", choices: [], policy: "allow_once", effective: true, reload_required: false},
+      {id: "read_file", source: "builtin", purpose: "读取隔离工作区顶层文本文件", risk: "high", capability: "supported", choices: ["deny", "allow_once"], policy: "deny", effective: true, reload_required: true},
+      {id: "search_web", source: "builtin", purpose: "联网搜索", risk: "network", capability: "experimental", choices: ["deny", "allow"], policy: "allow", effective: false, reload_required: true, pre_execution_approval: false, enforcement: "post_observation"},
+    ],
+  };
+  const ui = await boot(data);
+  const findRow = (id) => collectNodes(ui.get("tool-policy-list")).find(
+    r => r.className === "tool-row" && collectNodes(r).some(n => n.tag === "code" && n.textContent === id),
+  );
+
+  // read_file: allow_once -> deny 待重载时绝不能只显示绿色「当前生效」
+  const readRow = findRow("read_file");
+  const readBadges = collectNodes(readRow).filter(n => n.className === "badge");
+  assert.equal(readRow.dataset.reloadPending, "true");
+  assert.equal(readBadges.some(b => b.textContent === "当前生效" && b.dataset.state === "ready"), false);
+  const readPendingBadge = readBadges.find(b => b.textContent === "当前生效 · 重载后关闭");
+  assert.ok(readPendingBadge);
+  assert.equal(readPendingBadge.dataset.state, "warn");
+
+  // search_web: deny -> allow 待重载显示「当前未生效 · 重载后开启」
+  const searchRow = findRow("search_web");
+  const searchBadges = collectNodes(searchRow).filter(n => n.className === "badge");
+  assert.equal(searchRow.dataset.reloadPending, "true");
+  assert.ok(searchBadges.some(b => b.textContent === "当前未生效 · 重载后开启" && b.dataset.state === "warn"));
+
+  // astrbot_mcp: 未变化的行仍正常显示绿色「当前生效」
+  const mcpRow = findRow("astrbot_mcp");
+  const mcpBadges = collectNodes(mcpRow).filter(n => n.className === "badge");
+  assert.equal(mcpRow.dataset.reloadPending, undefined);
+  assert.ok(mcpBadges.some(b => b.textContent === "当前生效" && b.dataset.state === "ready"));
+
+  // search_web: allow -> deny 与 read_file: deny -> allow_once 反向场景
+  ui.api.render({
+    ...data,
+    tool_policy: {
+      enable_tools: true,
+      reload_required: true,
+      tools: [
+        {id: "read_file", source: "builtin", purpose: "读取隔离工作区顶层文本文件", risk: "high", capability: "supported", choices: ["deny", "allow_once"], policy: "allow_once", effective: false, reload_required: true},
+        {id: "search_web", source: "builtin", purpose: "联网搜索", risk: "network", capability: "experimental", choices: ["deny", "allow"], policy: "deny", effective: true, reload_required: true, pre_execution_approval: false, enforcement: "post_observation"},
+      ],
+    },
+  });
+  assert.ok(collectNodes(findRow("read_file")).some(b => b.className === "badge" && b.textContent === "当前未生效 · 重载后单次允许" && b.dataset.state === "warn"));
+  assert.ok(collectNodes(findRow("search_web")).some(b => b.className === "badge" && b.textContent === "当前生效 · 重载后关闭" && b.dataset.state === "warn"));
+});
+
+test("string-only bridge decodes [AGY:CODE] across all panel branches, prevents 409 LOGIN_BUSY auth misclassification, and keeps fallback without code", async () => {
+  // 真实 AstrBot 4.29.4 plugin_page_bridge.js 只用 new Error(stringMessage) reject，绝不带 .status
+  const bridgeErr = (msg) => new Error(msg);
+  const data = base();
+  data.tool_policy = {
+    enable_tools: true,
+    reload_required: false,
+    tools: [
+      {id: "read_file", source: "builtin", purpose: "读取文件", risk: "high", capability: "supported", choices: ["deny", "allow_once"], policy: "deny", effective: false, reload_required: false},
+    ],
+  };
+
+  const ui = await boot(data, {
+    apiGet: async (ep) => {
+      if (ep === "setup/status") return data;
+      if (ep === "monitor/status") return {schema_version: 2, sampled_at: "2026-11-26T00:00:00Z", instances: []};
+      if (ep === "monitor/quota") throw bridgeErr("[AGY:CLOSED] 插件已停用。");
+      if (ep.startsWith("monitor/daily/")) throw bridgeErr("[AGY:STORAGE_UNAVAILABLE] 每日统计存储不可用。");
+      return data;
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  // 1. monitor/quota [AGY:CLOSED]（无 .status）显示停用提示且剥离前缀
+  assert.match(ui.get("quota-alert").textContent, /插件已停用/);
+  assert.equal(ui.get("quota-alert").textContent.includes("[AGY:"), false);
+
+  // 2. monitor/daily [AGY:STORAGE_UNAVAILABLE]（无 .status）显示本地统计暂不可用且剥离前缀
+  assert.match(ui.get("daily-alert").children[0].textContent, /本地统计暂不可用/);
+  assert.equal(ui.get("daily-alert").children[0].textContent.includes("[AGY:"), false);
+
+  // 3. setup/quota-refresh [AGY:LOGIN_BUSY]（文案含「登录」且无 .status）绝不被误判为鉴权失败
+  assert.equal(ui.api.isAuthDeniedError(bridgeErr("[AGY:LOGIN_BUSY] 登录中，请稍后刷新。")), false);
+  assert.equal(ui.api.isAuthDeniedError(bridgeErr("[AGY:BUSY] 检测、登录或保存正在进行，请等待完成。")), false);
+  assert.equal(ui.api.isAuthDeniedError(bridgeErr("[AGY:CSRF_EXPIRED] 页面已过期，请刷新后重试。")), false);
+  assert.equal(ui.api.isAuthDeniedError(bridgeErr("[AGY:UNAUTHENTICATED] 请先登录 AstrBot 管理面板。")), true);
+  assert.equal(ui.api.isAuthDeniedError(bridgeErr("[AGY:FORBIDDEN] 仅 AstrBot 面板管理员可使用。")), true);
+
+  ui.bridge.apiPost = async () => {throw bridgeErr("[AGY:LOGIN_BUSY] 登录中，请稍后刷新。");};
+  await ui.api.refreshQuotaManual();
+  assert.match(ui.get("quota-alert").textContent, /官方登录正在进行中/);
+  assert.equal(ui.get("quota-alert").textContent.includes("无权"), false);
+  assert.equal(ui.get("quota-alert").textContent.includes("[AGY:"), false);
+
+  // 4. quota-refresh 覆盖 QUOTA_UNAVAILABLE / CSRF_EXPIRED / FORBIDDEN / UNAUTHENTICATED / BUSY
+  for (const [raw, expected] of [
+    ["[AGY:QUOTA_UNAVAILABLE] 额度服务尚未就绪。", /额度服务暂不可用/],
+    ["[AGY:CSRF_EXPIRED] 页面已过期，请刷新后重试。", /页面已过期，请刷新/],
+    ["[AGY:FORBIDDEN] 仅 AstrBot 面板管理员可使用设置页面。", /无权刷新账号额度/],
+    ["[AGY:UNAUTHENTICATED] 请先登录 AstrBot 管理面板。", /无权刷新账号额度/],
+    ["[AGY:BUSY] 操作进行中。", /其他操作正在进行中/],
+  ]) {
+    ui.bridge.apiPost = async () => {throw bridgeErr(raw);};
+    await ui.api.refreshQuotaManual();
+    assert.match(ui.get("quota-alert").textContent, expected);
+    assert.equal(ui.get("quota-alert").textContent.includes("[AGY:"), false);
+  }
+
+  // 5. setup/tool-policy 覆盖 CSRF_EXPIRED / CLOSED / FORBIDDEN / UNSUPPORTED / INTERNAL（均保留草稿并剥离前缀）
+  const readBtns = collectNodes(ui.get("tool-policy-list")).filter(n => n.tag === "button");
+  readBtns[1].click();
+  for (const [raw, expected] of [
+    ["[AGY:CSRF_EXPIRED] 页面已过期，请刷新后重试。", /页面已过期，请刷新.*已保留当前编辑内容/],
+    ["[AGY:CLOSED] 插件已停用。", /插件已停用.*已保留当前编辑内容/],
+    ["[AGY:FORBIDDEN] 仅面板管理员。", /无权修改工具策略.*已保留当前编辑内容/],
+    ["[AGY:UNSUPPORTED] 请先完成受支持 CLI 的版本检测。", /请先完成受支持 CLI 的版本检测.*已保留当前编辑内容/],
+    ["[AGY:INTERNAL] AGY 本地操作失败。", /AGY 本地操作失败.*已保留当前编辑内容/],
+  ]) {
+    ui.bridge.apiPost = async () => {throw bridgeErr(raw);};
+    await ui.api.saveToolPolicy();
+    assert.match(ui.get("tool-policy-feedback").textContent, expected);
+    assert.equal(ui.get("tool-policy-feedback").textContent.includes("[AGY:"), false);
+    assert.equal(ui.get("tool-policy-dirty-badge").hidden, false);
+  }
+
+  // 6. 首次设置 action() 与 poll() 同样剥离 [AGY:CODE] 并输出对应提示
+  ui.bridge.apiPost = async () => {throw bridgeErr("[AGY:CSRF_EXPIRED] 页面已过期，请刷新后重试。");};
+  await ui.api.action("check");
+  assert.match(ui.get("error").textContent, /页面已过期，请刷新/);
+  assert.equal(ui.get("error").textContent.includes("[AGY:"), false);
+
+  ui.bridge.apiPost = async () => {throw bridgeErr("[AGY:BUSY] 检测、登录或保存正在进行，请等待完成。");};
+  await ui.api.action("login");
+  assert.match(ui.get("error").textContent, /正在进行中/);
+  assert.equal(ui.get("error").textContent.includes("[AGY:"), false);
+
+  ui.bridge.apiGet = async () => {throw bridgeErr("[AGY:CLOSED] 插件已停用。");};
+  await ui.api.poll();
+  assert.equal(ui.get("error").textContent.includes("[AGY:"), false);
+
+  // 7. 无稳定码时的回退行为：直接请求的 HTTP status 仍兼容；纯字符串宿主鉴权错误仍命中鉴权提示
+  const direct409 = new Error("登录中，请稍后刷新。");
+  direct409.status = 409;
+  assert.equal(ui.api.isAuthDeniedError(direct409), false);
+  ui.bridge.apiPost = async () => {throw direct409;};
+  await ui.api.refreshQuotaManual();
+  assert.match(ui.get("quota-alert").textContent, /官方登录正在进行中/);
+
+  const hostAuthErr = bridgeErr("Unauthorized");
+  assert.equal(ui.api.isAuthDeniedError(hostAuthErr), true);
+  ui.bridge.apiPost = async () => {throw hostAuthErr;};
+  await ui.api.refreshQuotaManual();
+  assert.match(ui.get("quota-alert").textContent, /无权刷新账号额度/);
+
+  const unknownErr = bridgeErr("some network glitch");
+  assert.equal(ui.api.isAuthDeniedError(unknownErr), false);
+  ui.bridge.apiPost = async () => {throw unknownErr;};
+  await ui.api.refreshQuotaManual();
+  assert.equal(ui.get("quota-alert").textContent, "额度刷新请求失败，请稍后重试。");
 });
