@@ -1,7 +1,7 @@
 """Register only while the plugin is enabled; own no global CLI credentials."""
 
 import asyncio
-import json
+import sqlite3
 from copy import deepcopy
 
 from astrbot.api import logger
@@ -10,6 +10,17 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.provider import register as registry
 
 from .agy_provider._version import PLUGIN_VERSION
+from .agy_provider.admin_commands import (
+    HELP,
+    admin_command,
+    doctor_text,
+    models_text,
+    quota_text,
+    setup_text,
+    status_text,
+    usage_text,
+    use_text,
+)
 from .agy_provider.config import Settings
 from .agy_provider.errors import AgyError
 from .agy_provider.host_compat import install_host_compat, uninstall_host_compat
@@ -31,9 +42,19 @@ from .agy_provider.provider import (
     instance_cost_snapshots,
     terminate_all,
 )
-from .agy_provider.telemetry import format_cost_report, start_diagnostics, stop_diagnostics
+from .agy_provider.telemetry import daily_snapshot, format_cost_report, start_diagnostics, stop_diagnostics
 
 RESTORE_IDS = "_sl251_agy_provider_restore_ids"
+
+
+class BareAgyCommand(filter.CustomFilter):
+    def filter(self, event, cfg):
+        return event.is_at_or_wake_command and event.message_str.strip() == "agy"
+
+
+class AgySubcommands(BareAgyCommand):
+    def filter(self, event, cfg):
+        return not super().filter(event, cfg)
 
 
 def unregister_owned_adapter() -> None:
@@ -67,66 +88,53 @@ class AgyProviderPlugin(Star):
         self.setup_service = None
         self.monitor_service = None
 
+    # AstrBot checks group custom filters before it generates the bare command tree.
+    @filter.custom_filter(AgySubcommands)
     @filter.command_group("agy")
     async def agy(self, event: AstrMessageEvent):
         pass
 
+    @filter.custom_filter(BareAgyCommand)
+    @admin_command
+    async def agy_root(self, event: AstrMessageEvent):
+        yield event.plain_result(HELP)
+
     @agy.command("setup")
-    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    @admin_command
     async def setup(self, event: AstrMessageEvent):
-        if not event.is_admin():
-            return
         if self.stopping or self.setup_service is None:
             yield event.plain_result("AGY 插件尚未就绪，请启用后重试。")
             return
         service = self.setup_service
         busy = service.busy or service.login.busy
-        message = "AGY 首次设置\n打开 AstrBot WebUI → 插件 → Antigravity ACP → 首次设置。\n"
-        message += "检测或登录正在进行。" if busy else next_step(service.report)
-        if rows := service.providers():
-            message += "\n已配置模型：\n" + "\n".join(
-                f"{row['id']} · {row['model']} · mode={row.get('tools_mode', 'inherit')}"
-                for row in rows
-            )
-            message += "\n在本会话使用：/agy use <提供商 ID>（建议纯聊天优先用 chat 实例，工具会话用 tools 实例；统计：/agy cost）"
-        yield event.plain_result(message)
+        yield event.plain_result(setup_text(busy, next_step(service.report), service.providers()))
 
     @agy.command("use")
-    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    @admin_command
     async def use(self, event: AstrMessageEvent, provider_id: str = ""):
-        if not event.is_admin():
-            return
         service = self.setup_service
         if self.stopping or service is None:
             yield event.plain_result("AGY 插件尚未就绪。")
             return
         try:
             service._available()
-            allowed = {row["id"] for row in service.providers() if row["enabled"]}
+            allowed = {row["id"]: row for row in service.providers() if row["enabled"]}
             if provider_id not in allowed:
-                raise AgyError("CONFIG", "请先在首次设置页保存模型，再使用 /agy use <提供商 ID>。")
+                raise AgyError("CONFIG", "请指定已启用的模型实例 ID（可用 /agy models 查看）。")
             from astrbot.core.provider.entities import ProviderType
 
             await self.context.provider_manager.set_provider(
                 provider_id, ProviderType.CHAT_COMPLETION, event.unified_msg_origin
             )
-            chosen = next(
-                (row for row in service.providers() if row["id"] == provider_id), {}
-            )
-            mode = chosen.get("tools_mode", "inherit")
-            yield event.plain_result(
-                f"当前会话已切换到 {provider_id}（agy_tools_mode={mode}），可以开始聊天。"
-            )
+            yield event.plain_result(use_text(provider_id, allowed[provider_id]))
         except AgyError as exc:
             yield event.plain_result(str(exc))
         except Exception:
             yield event.plain_result("AGY 模型切换失败，请检查模型是否已启用，或重新运行首次设置。")
 
     @agy.command("cost")
-    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    @admin_command
     async def cost(self, event: AstrMessageEvent):
-        if not event.is_admin():
-            return
         if self.stopping:
             yield event.plain_result("AGY [CLOSED] 插件正在停用，无法读取成本统计。")
             return
@@ -148,11 +156,8 @@ class AgyProviderPlugin(Star):
         )
 
     @agy.command("doctor")
-    @filter.permission_type(filter.PermissionType.ADMIN, raise_error=False)
+    @admin_command
     async def doctor(self, event: AstrMessageEvent):
-        # Also fail closed for direct handler invocation outside the dispatcher.
-        if not event.is_admin():
-            return
         if self.stopping:
             yield event.plain_result("AGY [CLOSED] 插件正在停用，请启用后再自检。")
             return
@@ -177,11 +182,60 @@ class AgyProviderPlugin(Star):
                 report["routing"] = routing_snapshot(self.context.provider_manager)
             finally:
                 self.doctor_task = None
-        yield event.plain_result(
-            "AGY 无生成自检（不会发送模型提示）：\n"
-            + json.dumps(report, ensure_ascii=False, indent=2)
-            + "\n" + next_step(report)
-        )
+        yield event.plain_result(doctor_text(report, next_step(report)))
+
+    @agy.command("help")
+    @admin_command
+    async def help(self, event: AstrMessageEvent):
+        yield event.plain_result(HELP)
+
+    @agy.command("quota")
+    @admin_command
+    async def quota(self, event: AstrMessageEvent):
+        service = self.setup_service
+        if self.stopping or service is None:
+            yield event.plain_result("AGY 插件尚未就绪。")
+        elif service.login.busy:
+            yield event.plain_result("登录中，请稍后查询额度。")
+        else:
+            try:
+                message = quota_text(await service.quota.refresh())
+            except AgyError as exc:
+                if exc.code != "CLOSED":
+                    raise
+                message = str(exc)
+            yield event.plain_result(message)
+
+    @agy.command("status")
+    @admin_command
+    async def status(self, event: AstrMessageEvent):
+        if self.stopping or self.setup_service is None:
+            yield event.plain_result("AGY 插件尚未就绪。")
+            return
+        yield event.plain_result(status_text(PLUGIN_VERSION, instance_cost_snapshots()))
+
+    @agy.command("models")
+    @admin_command
+    async def models(self, event: AstrMessageEvent):
+        if self.stopping or self.setup_service is None:
+            yield event.plain_result("AGY 插件尚未就绪。")
+            return
+        yield event.plain_result(models_text(self.setup_service.providers()))
+
+    @agy.command("usage")
+    @admin_command
+    async def usage(self, event: AstrMessageEvent, days: str = "90"):
+        if self.stopping:
+            yield event.plain_result("AGY 插件正在停用。")
+            return
+        if days not in ("30", "90", "365"):
+            yield event.plain_result("用法：/agy usage [30|90|365]")
+            return
+        try:
+            message = usage_text(daily_snapshot(int(days)))
+        except (OSError, sqlite3.Error):
+            message = "每日统计存储不可用。"
+        yield event.plain_result(message)
 
     async def initialize(self):
         repairs = {}
@@ -236,9 +290,11 @@ class AgyProviderPlugin(Star):
         )
         self.stopping = False
         start_diagnostics(plugin_data_root())
-        self.setup_service = Onboarding(self.context, settings)
+        self.setup_service = Onboarding(self.context, settings, self.config)
+        if warning := self.setup_service.command_scope_warning():
+            logger.warning(warning)
         self.setup_service.register()
-        self.monitor_service = Monitoring(self.context)
+        self.monitor_service = Monitoring(self.context, self.setup_service.quota)
         self.monitor_service.register()
         active_names = {inst.runtime.root.name for inst in active_instances()}
         data_root = plugin_data_root()

@@ -1,0 +1,119 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "sess_redacted_1",
+      "update": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_12488963028538606273",
+        "name": "read_file",
+        "args": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        },
+        "status": "in_progress",
+        "kind": "read",
+        "title": "File sample_read.txt",
+        "locations": [
+          {
+            "path": "/isolated/workspace/sample_read.txt"
+          }
+        ],
+        "rawInput": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        }
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "sess_redacted_1",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call_12488963028538606273",
+        "name": "read_file",
+        "args": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        },
+        "status": "pending",
+        "kind": "read",
+        "title": "File sample_read.txt",
+        "locations": [
+          {
+            "path": "/isolated/workspace/sample_read.txt"
+          }
+        ],
+        "rawInput": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        }
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/request_permission",
+    "params": {
+      "sessionId": "sess_redacted_1",
+      "toolCall": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call_12488963028538606273",
+        "name": "read_file",
+        "args": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        },
+        "status": "pending",
+        "kind": "read",
+        "title": "File sample_read.txt",
+        "locations": [
+          {
+            "path": "/isolated/workspace/sample_read.txt"
+          }
+        ],
+        "rawInput": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        }
+      },
+      "options": [
+        {
+          "optionId": "allow",
+          "name": "Allow",
+          "kind": "allow_once"
+        },
+        {
+          "optionId": "deny",
+          "name": "Deny",
+          "kind": "reject_once"
+        }
+      ]
+    },
+    "id": "3"
+  },
+  {
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+      "sessionId": "sess_redacted_1",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call_12488963028538606273",
+        "name": "read_file",
+        "args": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        },
+        "status": "completed",
+        "kind": "read",
+        "title": "File sample_read.txt",
+        "locations": [
+          {
+            "path": "/isolated/workspace/sample_read.txt"
+          }
+        ],
+        "rawInput": {
+          "Path": "/isolated/workspace/sample_read.txt"
+        }
+      }
+    }
+  }
+]

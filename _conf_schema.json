@@ -166,11 +166,24 @@
     },
     "hint": "合法整数范围 4096–8388608；非法数值在加载时恢复为默认值并告警。"
   },
+  "builtin_read_file": {
+    "description": "隔离工作区顶层 .txt 只读授权（需工具总闸及已验证 Linux CLI 1.5.17/1.5.18，支持按行读取，可无 MCP 独立启用，重载生效）",
+    "type": "string",
+    "options": ["deny", "allow_once"],
+    "default": "deny"
+  },
+  "builtin_search_web": {
+    "description": "CLI 联网搜索（实验性，需工具总闸，可无 MCP 独立启用，重载生效）",
+    "type": "string",
+    "options": ["deny", "allow"],
+    "default": "deny",
+    "hint": "CLI 自动执行搜索，无法在执行前审批。关闭后通过模型护栏和事后中止限制；发现时搜索请求可能已发出。"
+  },
   "enable_tools": {
-    "description": "启用宿主工具桥（需完整工具 schema 与宿主会话）",
+    "description": "启用工具总闸（宿主 MCP 工具桥与已授权 CLI 原生只读/搜索工具）",
     "type": "bool",
     "default": false,
-    "hint": "总闸；非空工具集启用默认 agent。POSIX 使用私有 Unix socket，Windows 使用仅绑定 127.0.0.1 的每会话认证桥；执行/审批仍交宿主，跨平台端到端验收待完成。"
+    "hint": "总闸；非空宿主 MCP 或已启用的原生内置工具会启用默认 agent（纯内置模式不启动多余 MCP 子进程）。POSIX 使用私有 Unix socket，Windows 使用仅绑定 127.0.0.1 的每会话认证桥；宿主工具执行/审批仍交宿主。"
   },
   "session_reuse_mode": {
     "description": "会话复用模式",
@@ -217,7 +230,7 @@
     "hint": "总闸；需同时在 AstrBot 模型设置中勾选 image 能力，保存后重载生效。读取本地图片须配置下方 media_roots；不支持音频、视频、PDF 与图片生成。"
   },
   "tool_max_calls": {
-    "description": "单轮最大工具调用次数",
+    "description": "单轮工具调用预算",
     "type": "int",
     "default": 16,
     "slider": {
@@ -225,7 +238,7 @@
       "max": 128,
       "step": 1
     },
-    "hint": "合法整数范围 1–128；非法数值在加载时恢复为默认值并告警。"
+    "hint": "合法整数范围 1–128；非法数值恢复为默认值并告警。实验性 CLI 联网搜索按通知计数，超预算时中止本轮，搜索请求可能已发出。"
   },
   "tool_max_concurrent": {
     "description": "单轮最大待处理工具数",

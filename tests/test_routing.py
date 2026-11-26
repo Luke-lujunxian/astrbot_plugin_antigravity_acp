@@ -246,8 +246,8 @@ def _install_web_and_entities(saved_modules):
     web_mod.json_response = lambda data, status_code=200, headers=None: {
         "status_code": status_code, "headers": dict(headers or {}), "data": copy.deepcopy(data)
     }
-    web_mod.error_response = lambda msg, status_code=400, headers=None: {
-        "status_code": status_code, "headers": dict(headers or {}), "data": {"message": msg}
+    web_mod.error_response = lambda msg, status_code=400, data=None, headers=None: {
+        "status_code": status_code, "headers": dict(headers or {}), "data": {"message": msg, **(data or {})}
     }
     sys.modules["astrbot.api.web"] = web_mod
 

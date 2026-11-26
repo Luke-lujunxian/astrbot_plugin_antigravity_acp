@@ -138,6 +138,25 @@ for line in sys.stdin:
             block_types=[b.get("type") for b in blocks if isinstance(b, dict)],
         )
         cur = active_scenario()
+        if cur in {"builtin-search", "builtin-search-over-budget"}:
+            for index in range(2 if cur == "builtin-search-over-budget" else 1):
+                call = {"toolCallId": f"search-{prompt_seq}-{index}", "name": "search_web", "kind": "search"}
+                args = {"query": "synthetic query"}
+                send({"method": "session/update", "params": {"sessionId": "fake-session", "update": {
+                    **call, "sessionUpdate": "tool_call", "status": "in_progress", "rawInput": args, "args": args}}})
+                send({"method": "session/update", "params": {"sessionId": "fake-session", "update": {
+                    **call, "sessionUpdate": "tool_call_update", "status": "completed"}}})
+            if cur == "builtin-search-over-budget":
+                continue  # Await cancellation after the second notification.
+        if cur in {"builtin-denied", "partial-builtin-denied"}:
+            if cur == "partial-builtin-denied":
+                send({"method": "session/update", "params": {"sessionId": "fake-session", "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "prefix"}}}})
+                time.sleep(0.05)
+            send({"method": "session/update", "params": {"sessionId": "fake-session", "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "search-1", "name": "search_web",
+                "status": "in_progress"}}})
+            continue
         if cur in {
             "content-429", "content-429-quota", "content-429-retry-info",
             "content-429-after-text", "content-429-multiline",

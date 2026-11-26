@@ -4,9 +4,9 @@
 
 ## 必须保持的边界
 
-- 模型请求只走官方 CLI；不做 HTTP 反代、指纹伪造、号池或破限。隔离 `--gemini-dir`、`--app-data-dir` 与 workspace，拒绝 CLI 内置文件、终端、web search、browser 能力。
+- 模型请求只走官方 CLI；不做 HTTP 反代、指纹伪造、号池或破限。隔离 `--gemini-dir`、`--app-data-dir` 与 workspace，默认拒绝 CLI 内置能力。#38 / #41 唯一开放与受控范围见 [接口契约](docs/api.md) 与 [原生工具调查报告](docs/issue41-builtin-tools-probe.md)：Linux + CLI `1.5.17` / `1.5.18` 经版本及路径核验后可单次读取隔离工作区顶层普通 `.txt`；`search_web` 仅限实验性事后观测开关（不得宣称事前拦截）；终端、写/改文件、`browser`、`read_url`、`execute_url` 与多代理调度工具保持拒绝。
 - 认证由官方 CLI 管理。文件桥只核验元数据并创建单文件链接；不得读取、解析、复制或记录 OAuth 内容、系统凭据。授权 URL/code/ticket、代理密码、完整提示词与敏感工具参数不得进入日志、报告或聊天。
-- ACP 仅为当前活跃 prompt 中已观测、名称/ID/状态匹配的快照 MCP 调用选择唯一有效 `allow_once`；不得永久授权。跨会话、过期、重复、未知和内置工具继续拒绝。放行不等于执行，宿主仍负责审批、原始 schema 校验、预算与执行隔离。
+- ACP 仅对当前活跃 prompt 中已观测、名称/ID/状态匹配的快照 MCP 或经路径及版本核验的 `read_file` 选择唯一有效 `allow_once`；不得永久授权。跨会话、过期、重复和未知工具继续拒绝。内置读取须在回包前计入共享预算；`search_web` 按通知计入同一预算，不属于 ACP `allow_once` 授权；MCP 仍由宿主审批并按原始 schema 校验、隔离执行。
 - 模型适配 schema 与宿主原始 schema 分开保存；执行按原始契约校验，两者均参与快照指纹。不得为兼容 Gemini 收窄宿主允许的数组值。
 - 已输出可见正文、交接工具或工具结果续轮后失败，保留 `no_retry` + `no_fallback`，禁止自动重放。仅思考/进度且未交接、未执行工具的失败可保留显式 fallback 资格；不得仅凭无正文推断无副作用。修改宿主兼容层须核对声明版本的真实 runner，不能只依赖异常属性。
 - system 只过滤已知失实宿主能力声明，并对结构锚定的 Safe Mode 已知单句做 #19 等义改写；保留其他人格与用户历史，不做通用删词或净化重试。`content_429_candidate` 仅为候选遥测，不能证明 Google 内容过滤、风控或额度根因。

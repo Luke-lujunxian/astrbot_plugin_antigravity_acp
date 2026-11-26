@@ -19,6 +19,7 @@
         <p id="connection" class="connection" role="status">正在连接…</p>
       </div>
       <div class="toolbar">
+        <button id="open-commands" class="btn btn-ghost btn-sm" type="button">指令帮助</button>
         <button id="theme-toggle" class="btn btn-ghost btn-sm" type="button">主题：自动</button>
       </div>
     </header>
@@ -26,15 +27,18 @@
     <div id="error" class="alert alert-error" role="alert" hidden></div>
     <div id="route-alert" class="alert alert-error alert-row" role="alert" hidden></div>
     <div id="drift-alert" class="alert alert-warn alert-row" role="status" hidden></div>
+    <div id="command-scope-alert" class="alert alert-warn" role="status" hidden></div>
+    <div id="setup-guide-alert" class="alert alert-warn alert-row" role="status" hidden></div>
 
     <nav class="v-tabs" aria-label="主视图">
       <button id="tab-btn-monitor" class="v-tab is-active" data-tab="monitor" type="button">运行监控</button>
       <button id="tab-btn-models" class="v-tab" data-tab="models" type="button">模型管理</button>
+      <button id="tab-btn-tools" class="v-tab" data-tab="tools" type="button">工具权限</button>
       <button id="tab-btn-setup" class="v-tab" data-tab="setup" type="button">环境与认证</button>
     </nav>
 
-    <!-- Tab 1（首页）：运行监控 -->
-    <section id="tab-monitor">
+    <!-- Tab 1（首页）：运行监控 + 账号额度 + 每日用量 -->
+    <section id="tab-monitor" class="monitor-stack">
       <section class="card monitor" id="monitor" aria-labelledby="monitor-heading">
         <div class="card-head">
           <div class="card-title">
@@ -62,7 +66,62 @@
           <p id="monitor-message" class="hint-text" role="status">正在读取…</p>
           <details class="drawer"><summary>路由详情</summary><dl id="routing-summary" class="kv-list drawer-body"></dl></details>
           <div id="monitor-instances" class="monitor-instances"></div>
-          <details class="drawer"><summary>持久失败诊断</summary><div class="drawer-body"><p id="failure-storage" class="small"></p><div id="persistent-failures" class="provider-list"></div></div></details>
+        </div>
+      </section>
+
+      <section class="card quota-card" id="quota-card" aria-labelledby="quota-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <h2 id="quota-heading">账号额度</h2>
+            <span id="quota-badge" class="badge">未查询</span>
+          </div>
+          <div class="card-head-actions">
+            <span id="quota-updated" class="small"></span>
+            <button id="quota-refresh" class="btn btn-sm" type="button" disabled>刷新额度</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div id="quota-alert" class="alert alert-warn" role="alert" hidden></div>
+          <div id="quota-body" class="quota-body"></div>
+          <p id="quota-meta" class="small"></p>
+        </div>
+      </section>
+
+      <section class="card daily-card" id="daily-card" aria-labelledby="daily-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <h2 id="daily-heading">每日用量</h2>
+            <span class="tag">本地统计</span>
+          </div>
+          <div class="card-head-actions daily-controls">
+            <div class="seg-group" role="group" aria-label="统计周期">
+              <button id="daily-range-30" class="seg-btn" type="button" aria-pressed="false">30天</button>
+              <button id="daily-range-90" class="seg-btn is-active" type="button" aria-pressed="true">90天</button>
+              <button id="daily-range-365" class="seg-btn" type="button" aria-pressed="false">365天</button>
+            </div>
+            <div class="seg-group" role="group" aria-label="统计指标">
+              <button id="daily-metric-requests" class="seg-btn is-active" type="button" aria-pressed="true">请求数</button>
+              <button id="daily-metric-tokens" class="seg-btn" type="button" aria-pressed="false">Token</button>
+            </div>
+            <div class="daily-model-wrap">
+              <label for="daily-model-filter" class="visually-hidden">按模型筛选</label>
+              <select id="daily-model-filter" class="select-sm" aria-label="按模型筛选">
+                <option value="">全部模型</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="card-body">
+          <div id="daily-alert" class="alert alert-error alert-row" role="alert" hidden></div>
+          <div id="daily-summary" class="daily-kpi-grid"></div>
+          <div id="daily-heatmap-wrap" class="heatmap-wrap">
+            <div id="daily-heatmap" class="heatmap-scroll"></div>
+            <div class="heatmap-footer">
+              <div id="daily-detail" class="heatmap-detail" aria-live="polite"></div>
+              <div id="daily-legend" class="heatmap-legend" aria-label="热力图图例"></div>
+            </div>
+          </div>
+          <p id="daily-footnote" class="small">以上为插件本地记录的对话使用量，不代表 Google 账号真实额度消耗。</p>
         </div>
       </section>
     </section>
@@ -88,7 +147,34 @@
       </section>
     </section>
 
-    <!-- Tab 3：环境与认证 -->
+    <!-- Tab 3：工具权限 -->
+    <section id="tab-tools" hidden>
+      <section class="card" id="tool-policy-card" aria-labelledby="tool-policy-heading">
+        <div class="card-head">
+          <div class="card-title">
+            <h2 id="tool-policy-heading">工具权限</h2>
+            <span id="tool-policy-master-badge" class="badge">状态未知</span>
+            <span id="tool-policy-dirty-badge" class="badge" data-state="warn" hidden>未保存</span>
+          </div>
+          <div class="card-head-actions">
+            <button id="tool-policy-goto-models" class="btn btn-ghost btn-sm" type="button">实例模式 →</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div id="tool-policy-master-alert" class="alert alert-warn" role="status" hidden></div>
+          <div id="tool-policy-reload-alert" class="alert alert-warn" role="status" hidden></div>
+          <p id="tool-policy-intro" class="hint-text">内置工具默认拒绝，保存后需重载插件生效。</p>
+          <div id="tool-policy-list" class="tool-policy-groups"></div>
+          <div id="tool-policy-feedback" class="alert alert-error" role="alert" hidden></div>
+          <div id="tool-policy-actions" class="tool-policy-actions" hidden>
+            <button id="tool-policy-reset" class="btn btn-ghost" type="button" disabled>恢复已保存</button>
+            <button id="tool-policy-save" class="btn btn-primary" type="button" disabled>保存策略</button>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <!-- Tab 4：环境与认证 -->
     <section id="tab-setup" hidden>
       <ol id="setup-progress" class="setup-progress" aria-label="设置进度"></ol>
 
@@ -181,7 +267,7 @@
 
     <!-- 弹窗 1：添加 / 编辑模型 -->
     <div id="modal-form" class="modal-backdrop" hidden>
-      <section class="card modal-card" aria-labelledby="modal-form-title">
+      <section class="card modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-form-title">
         <div class="card-head">
           <h2 id="modal-form-title">添加模型</h2>
           <button id="modal-close" class="btn btn-ghost btn-sm" type="button">关闭</button>
@@ -231,7 +317,7 @@
 
     <!-- 弹窗 2：停用 / 删除影响预览与安全迁移 -->
     <div id="modal-impact" class="modal-backdrop" hidden>
-      <section class="card modal-card" aria-labelledby="impact-title">
+      <section class="card modal-card" role="dialog" aria-modal="true" aria-labelledby="impact-title">
         <div class="card-head">
           <h2 id="impact-title">确认操作</h2>
           <button id="impact-close" class="btn btn-ghost btn-sm" type="button">关闭</button>
@@ -247,6 +333,20 @@
             <button id="impact-cancel" class="btn btn-ghost" type="button">取消</button>
             <button id="impact-confirm" class="btn btn-danger-soft" type="button">确认</button>
           </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 弹窗 3：管理员指令帮助（按需展开，不占监控主页面） -->
+    <div id="modal-commands" class="modal-backdrop" hidden>
+      <section class="card modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="commands-title">
+        <div class="card-head">
+          <h2 id="commands-title">聊天管理员指令</h2>
+          <button id="commands-close" class="btn btn-ghost btn-sm" type="button">关闭</button>
+        </div>
+        <div class="card-body">
+          <p class="small">仅限 AstrBot 管理员在插件启用且消息分发给插件的私聊或群聊中使用；非管理员将收到固定拒绝提示。</p>
+          <div id="commands-list" class="commands-list"></div>
         </div>
       </section>
     </div>

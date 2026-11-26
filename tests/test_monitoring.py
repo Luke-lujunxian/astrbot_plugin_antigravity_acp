@@ -216,9 +216,33 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response["status_code"], expected)
             self.assertEqual(response["headers"]["Cache-Control"], "no-store")
             if expected != 200:
-                self.assertNotIn("data", response)
+                code = "UNAUTHENTICATED" if expected == 401 else "FORBIDDEN"
+                self.assertEqual(response["data"], {"code": code})
+                self.assertTrue(response["message"].startswith(f"[AGY:{code}] "))
         self.manager.acm.default_conf.pop("dashboard")
         self.assertEqual((await self.service.handle())["status_code"], 403)
+
+    async def test_quota_and_daily_get_are_local_and_admin_only(self):
+        from agy_provider.quota import QuotaService
+        from agy_provider.telemetry import start_diagnostics, stop_diagnostics
+        start_diagnostics(Path(self.temp.name))
+        self.addCleanup(stop_diagnostics)
+        self.service.quota = QuotaService(Settings())
+        self.service.quota.refresh = AsyncMock()
+        self.service.register()
+        for path, handler, methods, _ in self.context.registered_web_apis:
+            self.assertEqual(methods, ["GET"])
+            if path.endswith("/status"):
+                continue
+            for who, code in ((None, 401), ("api_key:123", 403), ("ordinary", 403), ("panel-owner", 200)):
+                self.request.username = who
+                response = await handler()
+                self.assertEqual(response["status_code"], code)
+                self.assertEqual(response["headers"]["Cache-Control"], "no-store")
+                if code == 200 and "/daily/" in path:
+                    self.assertEqual(response["data"]["days"], [])
+                    self.assertEqual(response["data"]["range"]["days"], int(path.rsplit("/", 1)[-1]))
+        self.service.quota.refresh.assert_not_awaited()
 
     async def test_route_lifecycle_only_removes_owned_get_handler(self):
         self.service.register()
@@ -230,7 +254,18 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         await self.service.close()
         await self.service.close()
         self.assertEqual(self.context.registered_web_apis, [replacement])
-        self.assertEqual((await handler())["status_code"], 503)
+        response = await handler()
+        self.assertEqual(response["status_code"], 503)
+        self.assertEqual(response["data"], {"code": "CLOSED"})
+        self.assertTrue(response["message"].startswith("[AGY:CLOSED] "))
+
+    async def test_unavailable_daily_storage_has_distinct_bridge_code(self):
+        with patch("agy_provider.monitoring.daily_snapshot", side_effect=OSError("path")):
+            response = await self.service.handle("daily/90")
+        self.assertEqual(response["status_code"], 503)
+        self.assertEqual(response["data"], {"code": "STORAGE_UNAVAILABLE"})
+        self.assertTrue(response["message"].startswith("[AGY:STORAGE_UNAVAILABLE] "))
+        self.assertNotIn("path", str(response))
 
     async def test_privacy_regression_safe_recent_turns_and_monitor_status(self):
         inst = self.instance("priv")

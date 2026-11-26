@@ -17,6 +17,13 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .builtin_tools import (
+    SEARCH_ABORTED_NOTICE,
+    BuiltinDenied,
+    is_known_builtin,
+    read_args_digest,
+    read_target,
+)
 from .config import Settings
 from .bridge_transport import BridgeTransport, TOKEN_ENV
 from .errors import AgyError
@@ -370,6 +377,14 @@ class ToolBroker:
         self.closed = False
         self.tasks = set()
         self.notifications = {}
+        self.read_workspace = None
+        self.read_calls = {}
+        self.read_args = {}
+        self.read_decisions = {}
+        self.search_calls = {}
+        self.search_seen = set()
+        self.search_args = {}
+        self.on_builtin_call = None
         self.error = None
         self.close_task = None
         self.audit_sink = None
@@ -587,17 +602,105 @@ class ToolBroker:
             {"content": [{"type": "text", "text": content}], "isError": False}
         )
 
+    @property
+    def read_ledger_full(self):
+        return len(self.read_decisions) >= MAX_SESSION_CALLS
+
+    @property
+    def observed_count(self):
+        return len(self.notifications) + len(self.read_calls) + len(self.search_calls)
+
+    def observe_read(self, update, ident, raw_name):
+        if not self.read_workspace:
+            raise BuiltinDenied()
+        previous = self.read_calls.get(ident)
+        if not ident or len(ident) > 256 or ident in self.notifications or raw_name not in ("read_file", None):
+            raise BuiltinDenied()
+        if previous is None and (
+            update.get("sessionUpdate") != "tool_call" or raw_name != "read_file"
+            or ident in self.read_decisions or self.read_ledger_full
+            or self.observed_count >= self.settings.tool_max_calls
+        ):
+            raise BuiltinDenied()
+        status = update.get("status")
+        if status not in ("in_progress", "pending", "completed", "failed"):
+            raise BuiltinDenied()
+        if previous and previous[1] in ("completed", "failed"):
+            raise BuiltinDenied()
+        if status == "completed" and not self.read_decisions.get(ident):
+            raise BuiltinDenied()
+        target = read_target(update, self.read_workspace)
+        args_key = read_args_digest(update.get("rawInput"))
+        if previous and not any(k in update for k in ("rawInput", "args", "locations")):
+            target = previous[0]
+            args_key = self.read_args.get(ident)
+        if target is None or (previous and previous[0] != target):
+            raise BuiltinDenied()
+        if previous and ident in self.read_args and args_key != self.read_args[ident]:
+            raise BuiltinDenied()
+        self.read_calls[ident] = (target, status)
+        if args_key is not None:
+            self.read_args[ident] = args_key
+
+    def observe_search(self, update, ident):
+        if (not self.turn_active or self.closed or not self.settings.enable_tools
+                or self.settings.builtin_search_web != "allow"
+                or not ident or len(ident) > 256 or ident in self.notifications
+                or ident in self.read_calls or ident in self.read_decisions):
+            raise BuiltinDenied(message=SEARCH_ABORTED_NOTICE, user_notice=SEARCH_ABORTED_NOTICE)
+        status = update.get("status")
+        if ident in self.search_calls:
+            if (update.get("sessionUpdate") != "tool_call_update"
+                    or update.get("name", "search_web") != "search_web"
+                    or update.get("kind", "search") != "search"
+                    or self.search_calls[ident] != "in_progress"
+                    or status not in ("in_progress", "completed", "failed")
+                    or ("rawInput" in update and update["rawInput"] != self.search_args[ident])
+                    or ("args" in update and update["args"] != self.search_args[ident])):
+                raise BuiltinDenied(message=SEARCH_ABORTED_NOTICE)
+            self.search_calls[ident] = status
+            return
+
+        args = update.get("rawInput")
+        if (update.get("sessionUpdate") != "tool_call" or update.get("kind") != "search"
+                or status != "in_progress" or ident in self.search_seen
+                or not isinstance(args, dict) or set(args) != {"query"}
+                or not isinstance(args["query"], str) or update.get("args", args) != args):
+            raise BuiltinDenied()
+        over_budget = (max(self.count, self.observed_count) >= self.settings.tool_max_calls
+                       or len(self.search_seen) >= MAX_SESSION_CALLS)
+        # The CLI can send the request before this notification, even over budget.
+        self.count += 1
+        if self.on_builtin_call:
+            self.on_builtin_call(observed=True)
+        self.search_args[ident] = args
+        if over_budget:
+            raise BuiltinDenied("TOOL_BUDGET", "检测到超预算的 CLI 联网搜索，已中止本轮；搜索请求可能已经发出。",
+                                user_notice=SEARCH_ABORTED_NOTICE)
+        self.search_seen.add(ident)
+        self.search_calls[ident] = status
+
     def observe(self, update):
         ident = update.get("toolCallId")
         if not isinstance(ident, str):
             raise AgyError("TOOL_PROTOCOL", "工具通知缺少 ID。")
-        name = self.snapshot.notification_name(update.get("name"))
+        raw_name = update.get("name")
+        if raw_name == "search_web" or ident in self.search_seen:
+            self.observe_search(update, ident)
+            return
+        if ident in self.read_calls or raw_name == "read_file":
+            self.observe_read(update, ident, raw_name)
+            return
+        if is_known_builtin(raw_name):
+            raise BuiltinDenied()
+        name = self.snapshot.notification_name(raw_name)
         previous = self.notifications.get(ident)
         if name is None and ("name" in update or previous is None):
-            raise AgyError("TOOL_PERMISSION", "AGY 尝试调用未授权的内置工具。")
+            raise AgyError("TOOL_PERMISSION", "AGY 尝试调用未授权的工具。",
+                           no_retry=True, no_fallback=True)
         if previous and name and previous[0] != name:
             raise AgyError("TOOL_PROTOCOL", "工具通知 ID 名称发生变化。")
-        if not previous and len(self.notifications) >= self.settings.tool_max_calls:
+        if not previous and self.observed_count >= self.settings.tool_max_calls:
             raise AgyError("TOOL_BUDGET", "工具通知超过本轮预算。")
         status = update.get("status", "in_progress")
         if previous and previous[1] in {"completed", "failed"}:

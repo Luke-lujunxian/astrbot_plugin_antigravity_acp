@@ -78,7 +78,7 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 
 若许可已通过但没有 tools/call，继续查 CLI/relay；若已到宿主，检查原始参数 schema、预算、审批与回填，不再归因“一次性许可被取消”。不要把 #12 的离线/回声桩结论扩大到所有生产工具和 QQ 链路。
 
-`TOOL_PERMISSION` 和工具守卫仅缓解 #11 的错误归因/误用；CLI 在内置工具被拒后未回喂模型就结束的问题仍存在。不要把 issue 关闭理解为该上游行为已经修复，或把未独立观测的宿主执行次数当作已知。
+已识别的内置工具被拒且尚无正文、工具交接或执行时，Provider 可用一条本地提示结束这轮，对话可继续（仅 `search_web` 提示搜索请求可能已发出，其余非搜索内置工具使用非搜索拒止文案）。CLI 可能直接结束 prompt，插件不重发。遇到 `search_web` 时优先使用宿主 MCP 搜索。实际运行边界与 `1.5.18` 实测结论见[工具策略](api.md#工具策略)与 [原生工具调查报告](issue41-builtin-tools-probe.md)。
 
 入口：[transport.py](../agy_provider/transport.py)、[tools.py](../agy_provider/tools.py)、[tool_turn.py](../agy_provider/tool_turn.py)、[sessions.py](../agy_provider/sessions.py)。测试：`tests.test_mcp_permissions`、`tests.test_permission_attribution`、`tests.test_tool_pipeline`。
 
@@ -125,3 +125,10 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 无生成自检只证明当时配置下的启动、认证/握手、会话与目录链路。继续核对真实调用的模型/档位、实例开关、会话旧偏好、历史预算、图片与工具上下文、输出/队列限制，再判断生成阶段的上游错误。
 
 按 [报告模板](testing.md#交付报告) 记录已确认事实、待验证推断、环境差异与下一步；真实生成、工具、跨平台认证、长期刷新分别验收，不用“检测通过”概括为全面可用。
+
+
+## 私聊中 /agy cost 被当成对话
+
+1. 在 AstrBot WebUI 找到该会话实际使用的配置。在「可用插件」列表（plugin_set）中保留已有项并勾选 astrbot_plugin_antigravity_acp，保存。检查会话级插件开关和唤醒前缀。
+2. 用同一管理员私聊发送 /agy help 和 /agy cost。再用非管理员发送 /agy cost，应只收到权限提示。两者都应停留在指令处理阶段。
+3. /new 由宿主保留插件提供，可单独命中。若 /agy 仍落入 LLM，核对当前配置绑定、插件启用状态、管理员 ID 字符串、加载版本及热重载记录。

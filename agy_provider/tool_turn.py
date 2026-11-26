@@ -75,6 +75,7 @@ class ToolTurn:
         logical_request_id=None,
         request_fingerprint=None,
         claimed_half_open=None,
+        allow_builtins: bool = False,
     ):
         self.runtime, self.request, self.key = runtime, request, key
         self.model, self.effort, self.snapshot, self.signal = (
@@ -88,6 +89,7 @@ class ToolTurn:
         self.logical_request_id = logical_request_id
         self.request_fingerprint = request_fingerprint
         self.claimed_half_open = claimed_half_open
+        self.allow_builtins = bool(allow_builtins)
         self.queue = asyncio.Queue(maxsize=128)
         self.resume = asyncio.Event()
         self.done_event = asyncio.Event()
@@ -157,6 +159,7 @@ class ToolTurn:
             logical_request_id=self.logical_request_id,
             request_fingerprint=self.request_fingerprint,
             claimed_half_open=self.claimed_half_open,
+            allow_builtins=self.allow_builtins,
         )
         final_status = "error"
         final_code = "TOOL_PROTOCOL"
@@ -340,6 +343,7 @@ async def chat_events(
     logical_request_id=None,
     request_fingerprint=None,
     claimed_half_open=None,
+    allow_builtins: bool = False,
 ):
     """Per-entry lock releases on host handoff; retained job owns original lease."""
     if key in runtime.entry_locks:
@@ -386,6 +390,7 @@ async def chat_events(
                 logical_request_id=logical_request_id,
                 request_fingerprint=request_fingerprint,
                 claimed_half_open=claimed_half_open,
+                allow_builtins=allow_builtins,
             )
             runtime.turns[key] = turn
         source = turn.events()

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from astrbot.api import logger
 
+from .daily_usage import DailyUsage
 from .failure_events import FailureJournal, STOP_REASONS, event_fields, MAX_BYTES, MAX_EVENTS, TTL
 
 MAX_HISTORY_TURNS = 100
@@ -71,21 +72,32 @@ IMAGE_TIMEOUT IMAGE_URL IMAGES_DISABLED HOST ROUTE_MISMATCH REFERENCE_BLOCKED
 
 
 _journal = None
+_daily = None
 _last_service = (None, None)
 
 
 def start_diagnostics(root):
-    global _journal, _last_service
+    global _journal, _daily, _last_service
     stop_diagnostics()
     _last_service = (None, None)
     _journal = FailureJournal(root, MONITOR_ERROR_CODES)
+    _daily = DailyUsage(root)
 
 
 def stop_diagnostics():
-    global _journal
+    global _journal, _daily
+    if _daily is not None:
+        _daily.close()
+        _daily = None
     if _journal is not None:
         _journal.close()
         _journal = None
+
+
+def daily_snapshot(days=90):
+    if _daily is None:
+        raise OSError("每日统计尚未就绪。")
+    return _daily.snapshot(days)
 
 
 def provider_tag(provider_id):
@@ -247,6 +259,9 @@ class TurnMeter:
         self.tool_schema_bytes: int = max(0, int(tool_schema_bytes))
         self.omitted_messages: int = 0
         self.estimate_method: str = estimate_method
+        self.no_fallback = False
+        self.builtin_used = False
+        self.builtin_observed = False
         self.tool_calls: int = 0
         self.request_sent: bool = False
         self.rpc_stage = "idle"
@@ -298,7 +313,7 @@ class TurnMeter:
 
     @property
     def replay_blocked(self):
-        return self.body_seen or self.tool_handed_off or self.tool_result_supplied
+        return self.body_seen or self.tool_handed_off or self.tool_result_supplied or self.builtin_used
 
     def observe_output(self, *, has_output: bool) -> None:
         """Record whether this turn produced any body text, thought, or tool call."""
@@ -336,6 +351,11 @@ class TurnMeter:
 
     def record_tool_call(self) -> None:
         self.tool_calls += 1
+
+    def record_builtin_call(self, *, observed=False):
+        self.builtin_used = True
+        self.builtin_observed |= observed
+        self.record_tool_call()
 
     def observe_usage(self, result: dict, *, source: str) -> None:
         buckets, cache_present = extract_acp_usage(result)
@@ -378,12 +398,18 @@ class TurnMeter:
 
         fallback_reason = None
         if status in {"error", "short_circuited"}:
-            if self.tool_handed_off:
+            if self.builtin_observed:
+                fallback_reason = "builtin_observed"
+            elif self.builtin_used:
+                fallback_reason = "builtin_grant"
+            elif self.tool_handed_off:
                 fallback_reason = "tool_handoff"
             elif self.tool_result_supplied:
                 fallback_reason = "tool_continuation"
             elif self.body_seen:
                 fallback_reason = "visible_prefix"
+            elif self.no_fallback:
+                fallback_reason = "policy_denial"
             else:
                 fallback_reason = "no_visible_prefix"
         record = {
@@ -512,6 +538,8 @@ class TelemetryTracker:
     def record_turn(self, record: dict) -> None:
         self._prune_history()
         record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+        if _daily is not None:
+            _daily.record(record)
         global _last_service
         if record.get("status") == "ok" and record.get("request_sent") and record.get("provider"):
             _last_service = (safe_label(record["provider"]), record["recorded_at"])
@@ -748,101 +776,137 @@ class TelemetryTracker:
         }
 
 
+_MODE_LABELS = {
+    "chat": "纯聊天",
+    "tools": "工具模式",
+    "inherit": "跟随总闸",
+}
+
+_REASON_LABELS = {
+    "no_identity": "无会话标识",
+    "abort": "请求中断",
+    "previous_error": "上轮异常",
+    "upstream_compaction_detected": "疑似上下文压缩",
+    "process_dead": "子进程已退出",
+    "idle_expired": "空闲超时回收",
+    "pool_evicted": "会话池淘汰",
+    "runtime_restart": "实例重启",
+    "cold_start": "冷启动",
+    "system_changed": "系统提示变更",
+    "model_changed": "底层模型变更",
+    "effort_changed": "思考档位变更",
+    "tool_hash_changed": "工具列表变更",
+    "tool_ledger_limit": "工具账本上限",
+    "history_rewrite": "历史消息重写",
+    "history_host_trim": "宿主裁剪历史",
+    "history_append_gap": "历史断档",
+    "unknown": "其他原因",
+}
+
+
 def _pct(value: float | None) -> str:
     return f"{value * 100:.1f}%" if value is not None else "样本不足"
 
 
+def _fmt_num(value: int | None) -> str:
+    return f"{value:,}" if isinstance(value, int) else "未知"
+
+
 def format_cost_report(instances: list[dict], settings_summary: dict) -> str:
-    """Format a read-only /agy cost report across active provider instances."""
+    """生成只读 /agy cost 摘要文本，保持精简且人类可读。"""
+    reuse_mode = settings_summary.get("session_reuse_mode", "strict")
+    history_kb = max(1, round(int(settings_summary.get("history_bytes", 160000)) / 1024))
+    tools_on = "开启" if settings_summary.get("enable_tools", False) else "关闭"
     lines = [
-        "AGY 成本与会话复用统计（只读，未发送模型请求；每实例保留 24 小时内最近 100 轮）",
-        "全局有效配置："
-        f"reuse={settings_summary.get('session_reuse_mode', 'strict')} · "
-        f"history_bytes={settings_summary.get('history_bytes', 160000)} · "
-        f"enable_tools={settings_summary.get('enable_tools', False)} · "
-        f"cost_log={settings_summary.get('cost_log_enabled', False)} · "
-        f"empty_ttl={settings_summary.get('empty_dedupe_ttl', 30)}s · "
-        f"quota_cooldown={settings_summary.get('quota_cooldown', 60)}s",
+        "AGY 成本与复用（近 24h · 只读，未发送模型请求）",
+        f"策略：复用 {reuse_mode} · 历史上限 {history_kb}KB · 工具总闸 {tools_on}",
     ]
     if not instances:
-        lines.append("当前没有已加载的 AGY provider 实例，尚无本轮统计样本。")
+        lines.append("当前没有已加载的 AGY 实例，暂无统计样本。")
         return "\n".join(lines)
 
     for inst in instances:
         summary = inst["summary"]
-        pool = inst["pool"]
+        pool = inst.get("pool") or {}
+        mode_cn = _MODE_LABELS.get(inst.get("effective_mode") or inst.get("tools_mode", "inherit"), "未知")
+        model = inst.get("model") or "(未指定)"
         lines.append("")
-        lines.append(
-            f"[{inst['provider_id']}] model={inst.get('model') or '(未指定)'} · "
-            f"tools_mode={inst.get('tools_mode', 'inherit')} (effective={inst.get('effective_mode', 'chat')})"
-        )
-        lines.append(
-            f"  进程池：保留会话 {pool.get('active_sessions', 0)}/{pool.get('max_sessions', 0)} · "
-            f"存活子进程 {pool.get('live_processes', 0)} · "
-            f"活跃工具轮 {pool.get('active_tool_turns', 0)}"
-        )
+        lines.append(f"【{model}】({inst['provider_id']}) · {mode_cn}")
+        active_sess = pool.get("active_sessions", pool.get("active", 0))
+        max_sess = pool.get("max_sessions", pool.get("capacity", 0))
+        live_proc = pool.get("live_processes", 0)
+        tool_turns = pool.get("active_tool_turns", 0)
+        pool_line = f"进程池：{active_sess}/{max_sess} 会话 · {live_proc} 进程"
+        if tool_turns:
+            pool_line += f" · {tool_turns} 工具续轮"
+        lines.append(pool_line)
+
         if summary["total_turns"] == 0:
-            lines.append("  请求样本：0 轮（启动以来样本不足）")
+            lines.append("请求：暂无样本")
             continue
-        lines.append(
-            f"  请求数：总 {summary['total_turns']}（实际发送 {summary['request_sent_turns']}，"
-            f"熔断/预检拦截 {summary['short_circuited_turns']}）"
+
+        req_line = f"请求：{summary['total_turns']} 轮（实发 {summary['request_sent_turns']}"
+        if summary["short_circuited_turns"]:
+            req_line += f"，拦截 {summary['short_circuited_turns']}"
+        req_line += "）"
+        lines.append(req_line)
+
+        reuse_line = (
+            f"复用：全量 {_pct(summary['reuse_rate'])} ({summary['reused_turns']}/{summary['request_sent_turns']})"
         )
-        lines.append(
-            f"  复用率：全量 {_pct(summary['reuse_rate'])} ({summary['reused_turns']}/{summary['request_sent_turns']}) · "
-            f"可复用候选 {_pct(summary['candidate_reuse_rate'])} ({summary['reused_turns']}/{summary['candidate_turns']})"
-        )
+        if summary["candidate_turns"] != summary["request_sent_turns"]:
+            reuse_line += (
+                f" · 候选 {_pct(summary['candidate_reuse_rate'])} "
+                f"({summary['reused_turns']}/{summary['candidate_turns']})"
+            )
+        lines.append(reuse_line)
+
         if summary["reported_usage_turns"] == 0:
             lines.append(
-                f"  Token/缓存：尚无已上报 usage（未知 usage {summary['unavailable_usage_turns']} 轮，"
-                f"占比 {_pct(summary['unavailable_ratio'])}；未知不按 0 计）"
+                f"Token：暂无上报（未知 {summary['unavailable_usage_turns']} 轮，"
+                f"{_pct(summary['unavailable_ratio'])}）"
             )
         else:
             lines.append(
-                f"  Token 汇总（已上报 {summary['reported_usage_turns']} 轮）："
-                f"input_other={summary['total_input_other']} · "
-                f"input_cached={summary['total_input_cached']} · "
-                f"output={summary['total_output']}"
+                f"Token：输入 {_fmt_num(summary['total_input_other'])} · "
+                f"缓存 {_fmt_num(summary['total_input_cached'])} · "
+                f"输出 {_fmt_num(summary['total_output'])}"
             )
-            lines.append(
-                f"  缓存与中位数：缓存占比 {_pct(summary['cache_token_ratio'])} · "
-                f"input_other 中位数={summary['median_input_other']} · "
-                f"total_input 中位数={summary['median_total_input']} · "
-                f"缺 cached 字段 {summary['missing_cache_field_turns']} 轮"
+            cache_line = (
+                f"缓存占比：{_pct(summary['cache_token_ratio'])} · "
+                f"中位输入 {_fmt_num(summary['median_total_input'])}"
             )
-            lines.append(
-                f"  未知 usage：{summary['unavailable_usage_turns']}/{summary['request_sent_turns']} "
-                f"({_pct(summary['unavailable_ratio'])})"
-            )
+            if summary["missing_cache_field_turns"]:
+                cache_line += f" · 缺缓存字段 {summary['missing_cache_field_turns']} 轮"
+            if summary["unavailable_usage_turns"]:
+                cache_line += (
+                    f" · 未知 {summary['unavailable_usage_turns']}/{summary['request_sent_turns']} "
+                    f"({_pct(summary['unavailable_ratio'])})"
+                )
+            lines.append(cache_line)
+
         if summary["failed_reported_turns"] > 0:
             lines.append(
-                f"  失败消耗（有 usage {summary['failed_reported_turns']} 轮）："
-                f"input_other={summary['failed_input_other']} · "
-                f"input_cached={summary['failed_input_cached']} · "
-                f"output={summary['failed_output']}"
+                f"失败消耗（{summary['failed_reported_turns']} 轮）："
+                f"输入 {_fmt_num(summary['failed_input_other'])} · "
+                f"缓存 {_fmt_num(summary['failed_input_cached'])} · "
+                f"输出 {_fmt_num(summary['failed_output'])}"
             )
         if summary["rebuild_reasons"]:
-            ranked = ", ".join(
-                f"{reason}={count}" for reason, count in summary["rebuild_reasons"][:6]
+            ranked = " · ".join(
+                f"{_REASON_LABELS.get(reason, reason)} {count}"
+                for reason, count in summary["rebuild_reasons"][:4]
             )
-            lines.append(f"  重建原因排行：{ranked}")
+            lines.append(f"重建原因：{ranked}")
         if summary["evictions"]:
-            ev = ", ".join(
-                f"{reason}={count}"
+            ev = " · ".join(
+                f"{_REASON_LABELS.get(reason, reason)} {count}"
                 for reason, count in sorted(summary["evictions"].items())
             )
-            lines.append(f"  会话回收次数（启动以来）：{ev}")
-        lines.append(
-            f"  疑似上下文压缩={summary.get('compaction_turns', 0)} · "
-            f"强错误快速中断={summary.get('fast_abort_turns', 0)}（上下文占用不计作计费 Token）"
-        )
-        for group in summary.get("groups", [])[:20]:
+            lines.append(f"会话回收：{ev}")
+        if summary.get("compaction_turns") or summary.get("fast_abort_turns"):
             lines.append(
-                f"  分组 {group['mode']}/{group['model']}/{group['status']}/{group['session']}："
-                f"{group['turns']} 轮，reported={group['reported']}，unknown={group['unknown']}，"
-                f"input_other={group['input_other']}，已知 input_cached={group['input_cached']}"
-                f"（缓存读取未知 {group['cached_read_unknown']} 轮），output={group['output']}"
+                f"异常保护：疑似压缩 {summary.get('compaction_turns', 0)} · "
+                f"快速中断 {summary.get('fast_abort_turns', 0)}"
             )
-        if len(summary.get("groups", [])) > 20:
-            lines.append("  分组仅显示前 20 项；上述总计包含全部样本。")
     return "\n".join(lines)

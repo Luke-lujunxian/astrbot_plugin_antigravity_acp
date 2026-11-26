@@ -12,6 +12,7 @@ from astrbot.api.provider import LLMResponse, Provider
 from astrbot.core.provider.entities import TokenUsage
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+from .builtin_tools import BuiltinDenied, builtin_tools_configured
 from .config import Settings
 from .errors import AgyError
 from .media import ImageFingerprints, prepare_media
@@ -488,6 +489,7 @@ class AgyProvider(Provider):
                 logger.warning("AGY enable_tools=false，未向 CLI 提供宿主工具。")
                 self.warned_tools = True
             snapshot = ToolSnapshot(func_tool if tools_for_prompt else None)
+            allow_builtins = bool(tools_for_prompt and builtin_tools_configured(self.settings))
             if snapshot.skipped:
                 logger.warning(
                     f"AGY 工具桥跳过 {len(snapshot.skipped)} 个不兼容工具 schema："
@@ -604,7 +606,7 @@ class AgyProvider(Provider):
                 meter = self.runtime.telemetry.start_turn(
                     provider=self.provider_id,
                     session_key_raw=key,
-                    mode="tools" if snapshot.tools else "chat",
+                    mode="tools" if (snapshot.tools or allow_builtins) else "chat",
                     model=diagnostic_model,
                     effort=effort,
                     system_bytes=request.system_bytes,
@@ -718,6 +720,7 @@ class AgyProvider(Provider):
                 logical_request_id=logical_request_id,
                 request_fingerprint=request_fingerprint,
                 claimed_half_open=claimed_half_open,
+                allow_builtins=allow_builtins,
             )
         else:
             source = self.runtime.stream(
@@ -725,12 +728,14 @@ class AgyProvider(Provider):
                 key,
                 selected,
                 effort,
+                snapshot,
                 meter=meter,
                 provider_id=self.provider_id,
                 logical_request_id=logical_request_id,
                 request_fingerprint=request_fingerprint,
                 continuation=False,
                 claimed_half_open=claimed_half_open,
+                allow_builtins=allow_builtins,
             )
         if continuation:
             meter.tool_result_supplied = True
@@ -792,6 +797,23 @@ class AgyProvider(Provider):
                     )
             if not done_seen and not handed_off:
                 raise AgyError("EMPTY", "AGY 未返回最终响应。")
+        except BuiltinDenied as exc:
+            exit_status, exit_code = "error", exc.code
+            if meter.replay_blocked or handed_off or continuation:
+                raise
+            # Runtime retired the failed native session and recorded its cost.
+            # Deliver a local terminal message; a new user turn can proceed.
+            notice = getattr(exc, "user_notice", None)
+            if notice:
+                # With tools disabled no AstrBot tool is offered through this plugin.
+                notice += ("你可以继续提问。" if exc.code == "TOOLS_DISABLED"
+                           else "你可以继续提问，或使用 AstrBot 已启用的工具。")
+            else:
+                notice = "本轮请求了受限的 CLI 内置工具，无法继续取得结果。你可以继续提问，或使用 AstrBot 已启用的工具。"
+            done_seen = True
+            if streaming:
+                yield LLMResponse(role="assistant", completion_text=notice, is_chunk=True)
+            yield LLMResponse(role="assistant", completion_text=notice, is_chunk=False)
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 exit_status = "cancelled"
@@ -817,7 +839,7 @@ class AgyProvider(Provider):
             try:
                 await events.aclose()
             except Exception as exc:
-                if meter.replay_blocked:
+                if meter.replay_blocked or done_seen:
                     if isinstance(exc, AgyError):
                         exc.no_retry = exc.no_fallback = True
                         raise

@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 
@@ -12,7 +11,7 @@ from .config import Settings
 from .errors import AgyError
 from .models import catalog_names, choices, find_option, options, select
 from .paths import plugin_data_root, windows_long_path
-from .process import discover, launch_args, make_home
+from .process import cli_version, discover, launch_args, make_home
 from .transport import AcpClient
 
 
@@ -80,12 +79,7 @@ async def _run_probe(
     stage("discovery")
     info = await discover(settings)
     # Do not publish the raw version banner; wrappers may print private data.
-    version = re.fullmatch(
-        r"(?:agy(?: version)?\s+)?v?(\d{1,4}\.\d{1,4}\.\d{1,4})",
-        info.version.strip(),
-        re.IGNORECASE,
-    )
-    report["cli_version"] = version[1] if version else "unrecognized"
+    report["cli_version"] = cli_version(info.version) or "unrecognized"
     report["cli_flags"] = {
         "disable_telemetry": info.disable_telemetry,
         "include_default_customizations": info.include_default_customizations,
@@ -113,6 +107,7 @@ async def _run_probe(
                 "windows_job" if getattr(client.proc, "_agy_job", None) is not None
                 else "windows_taskkill_fallback" if os.name == "nt" else "posix_process_group"
             )
+            report["verified_read"] = client.verified_read
             report["protocol_version"] = 1
             report["advertised_capabilities"] = capability_summary(client.capabilities)
             stage("session/new")
