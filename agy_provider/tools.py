@@ -27,7 +27,7 @@ from .builtin_tools import (
 from .config import Settings
 from .bridge_transport import BridgeTransport, TOKEN_ENV
 from .errors import AgyError
-from .messages import digest
+from .messages import canonical_calls, digest
 from .paths import remove_tree_robust
 
 SERVER_NAME = "astrbot"
@@ -355,9 +355,16 @@ class PendingCall:
     delivered: bool = False
     created_at: float = 0
     handed_off: asyncio.Event = field(default_factory=asyncio.Event)
+    execution_timed_out: bool = False
 
     def wire(self):
         return {"id": self.id, "name": self.name, "arguments": self.arguments}
+
+    def assistant_message(self, text):
+        calls = canonical_calls([
+            {"id": self.id, "function": {"name": self.name, "arguments": self.arguments}},
+        ])
+        return {"role": "assistant", "content": text, "tool_calls": calls}
 
 
 class ToolBroker:
@@ -385,7 +392,6 @@ class ToolBroker:
         self.search_seen = set()
         self.search_args = {}
         self.on_builtin_call = None
-        self.error = None
         self.close_task = None
         self.audit_sink = None
         self.transport = BridgeTransport(tcp=os.name == "nt")
@@ -540,10 +546,10 @@ class ToolBroker:
             if not call.delivered:
                 self.reject(call, "TOOL_APPROVAL_TIMEOUT")
                 return call.future.result()
-            self.error = AgyError(
+            call.execution_timed_out = True
+            raise AgyError(
                 "TOOL_TIMEOUT", "宿主审批或工具执行超时；不会自动重放。"
-            )
-            raise self.error from None
+            ) from None
         finally:
             delivered.cancel()
             await asyncio.gather(delivered, return_exceptions=True)
@@ -585,6 +591,13 @@ class ToolBroker:
         call = self.pending.get(call_id)
         if self.closed or call is None or not call.delivered or call.future.done():
             raise AgyError("TOOL_STALE", "工具结果迟到或重复。")
+        self.result_bytes += self.check_result(content)
+        call.state = "completed"
+        call.future.set_result(
+            {"content": [{"type": "text", "text": content}], "isError": False}
+        )
+
+    def check_result(self, content):
         if not isinstance(content, str):
             raise AgyError("TOOL_RESULT", "仅支持宿主文本/JSON文本工具结果。")
         validate_json(content, "TOOL_RESULT")
@@ -596,11 +609,7 @@ class ToolBroker:
             raise AgyError(
                 "TOOL_RESULT_LIMIT", "工具结果超过本轮总字节预算；不会截断。"
             )
-        self.result_bytes += size
-        call.state = "completed"
-        call.future.set_result(
-            {"content": [{"type": "text", "text": content}], "isError": False}
-        )
+        return size
 
     @property
     def read_ledger_full(self):

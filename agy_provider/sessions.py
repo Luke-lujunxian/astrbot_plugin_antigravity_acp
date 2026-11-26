@@ -217,6 +217,15 @@ def decide_reuse(
 
 
 @dataclass
+class TimedOutTool:
+    signal: asyncio.Event
+    expires_at: float
+    history_hashes: list[str]
+    source_revision: str | None
+    transient_hash: str
+
+
+@dataclass
 class Session:
     client: AcpClient | None = None
     broker: ToolBroker | None = None
@@ -235,6 +244,7 @@ class Session:
     used_at: float = field(default_factory=time.monotonic)
     lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
     finalization_signal: asyncio.Event | None = None
+    timed_out_tool: TimedOutTool | None = None
 
     @property
     def expected(self) -> list[str]:
@@ -243,6 +253,18 @@ class Session:
     @expected.setter
     def expected(self, value: list[str]) -> None:
         self.host_expected = list(value)
+
+    def matches_live_context(
+        self, request: ConversationInput, model: str, effort: str
+    ) -> bool:
+        return (
+            self.client is not None
+            and self.client.alive
+            and self.system_hash == request.system_hash
+            and self.system_structured == request.system_structured
+            and self.model == model
+            and self.effort == effort
+        )
 
     async def close(self) -> None:
         async with self.lifecycle:
@@ -272,6 +294,7 @@ class Session:
             self.effort = ""
             self.tool_hash = ""
             self.finalization_signal = None
+            self.timed_out_tool = None
 
 
 class Runtime:
@@ -293,6 +316,9 @@ class Runtime:
         self.turns = {}
         self.entry_locks = {}
         self.tool_outcomes: dict[str, str] = {}
+        # Keep timeout attribution even after the pool drops the session or the
+        # late result has been consumed. Recovery state lives with the session.
+        self.tool_timeouts: dict[str, None] = {}
         self.telemetry = TelemetryTracker(
             cost_log_enabled=settings.cost_log_enabled, clock=clock
         )
@@ -509,7 +535,9 @@ class Runtime:
         continuation: bool = False,
         claimed_half_open: tuple[str, str] | None = None,
         allow_builtins: bool = False,
-        finalization_signal: asyncio.Event | None = None,
+        host_signal: asyncio.Event | None = None,
+        finalizing: bool = False,
+        late_tool_result: bool = False,
     ) -> AsyncIterator[Event]:
         temporary = key is None
         local_meter = meter
@@ -527,28 +555,43 @@ class Runtime:
 
         async with self.lease(key or uuid.uuid4().hex, temporary) as session:
             result_tail = request.messages[-1]["role"] == "tool"
-            if finalization_signal is not None and result_tail:
+            if late_tool_result:
+                timed_out_tool = session.timed_out_tool
+                if (
+                    timed_out_tool is None
+                    or timed_out_tool.signal is not host_signal
+                    or timed_out_tool.signal.is_set()
+                    or time.monotonic() >= timed_out_tool.expires_at
+                    or not session.matches_live_context(request, model, effort)
+                    or request.source_revision != timed_out_tool.source_revision
+                    or request.transient_hash != timed_out_tool.transient_hash
+                    or request.hashes[:-1] != timed_out_tool.history_hashes
+                    or session.broker is None
+                ):
+                    raise AgyError(
+                        "TOOL_TIMEOUT", "原工具执行已超时，迟到结果已失效或与原工具轮不匹配。",
+                        no_retry=True, no_fallback=True,
+                    )
+                session.broker.check_result(request.messages[-1]["content"])
+            elif finalizing and host_signal is not None and result_tail:
                 # Accept only one closed exchange appended to the completed
                 # no-tool finalization of this live host run, as quoted history.
                 if (
-                    session.finalization_signal is not finalization_signal
-                    or session.client is None
-                    or not session.client.alive
-                    or session.system_hash != request.system_hash
-                    or session.system_structured != request.system_structured
-                    or session.model != model
-                    or session.effort != effort
+                    session.finalization_signal is not host_signal
+                    or not session.matches_live_context(request, model, effort)
                     or not request.messages[-2].get("tool_calls")
                     or request.hashes[:-2] != session.host_expected[:-1]
                     or request.messages[-1]["tool_call_id"] in self.tool_outcomes
                 ):
                     raise AgyError("TOOL_STALE", "无工具收尾已过期或历史不匹配，拒绝旧工具结果。")
             session.finalization_signal = None
+            session.timed_out_tool = None
             completed = False
             output_seen = False
             failure_exc: BaseException | None = None
             cancelled = False
             generation_started = False
+            last_tool = None
             try:
                 if not continuation and provider_id:
                     check = await self.failure_guard.check_empty_only(
@@ -677,7 +720,6 @@ class Runtime:
                     session.broker.read_args.clear()
                     session.broker.search_calls.clear()
                     session.broker.on_builtin_call = local_meter.record_builtin_call
-                    session.broker.error = None
                 text_parts = []
                 # Reset before a reused client's next turn, including errors
                 # before its async generator starts writing the prompt.
@@ -695,6 +737,7 @@ class Runtime:
                             continue
                         if event.kind == "tools":
                             local_meter.record_tool_call()
+                            last_tool = event.result["call"]
                         if event.kind == "thought":
                             output_seen = True
                         if event.kind == "text":
@@ -748,8 +791,8 @@ class Runtime:
                             )
                             sent_hashes = request.hashes
                             session.host_expected = sent_hashes + [assistant_hash]
-                            if not result_tail:
-                                session.finalization_signal = finalization_signal
+                            if finalizing and not result_tail:
+                                session.finalization_signal = host_signal
                             if request.persisted_user is not None:
                                 index, persisted_hash = request.persisted_user
                                 session.host_expected[index] = persisted_hash
@@ -819,13 +862,35 @@ class Runtime:
                             {"usage": latest_usage},
                             source=latest_source,
                         )
-                    error_code = (
-                        failure_exc.code
-                        if isinstance(failure_exc, AgyError)
-                        else "CANCELLED"
-                        if cancelled
-                        else "UPSTREAM"
-                    )
+                    retain_for_late_result = False
+                    if last_tool is not None and last_tool.execution_timed_out:
+                        error_code = "TOOL_TIMEOUT"
+                        cancelled = False
+                        self.tool_timeouts[last_tool.id] = None
+                        if len(self.tool_timeouts) > 256:
+                            del self.tool_timeouts[next(iter(self.tool_timeouts))]
+                        if (
+                            host_signal is not None
+                            and not host_signal.is_set()
+                            and session.client.alive
+                        ):
+                            # Never reuse the interrupted native prompt. Keep the
+                            # live session as proof for a single history rebuild.
+                            text = "".join(text_parts)[len(request.consumed_text):]
+                            session.timed_out_tool = TimedOutTool(
+                                host_signal,
+                                time.monotonic() + self.settings.idle_ttl,
+                                request.hashes + [digest(last_tool.assistant_message(text))],
+                                request.source_revision,
+                                request.transient_hash,
+                            )
+                            session.host_expected.clear()
+                            retain_for_late_result = True
+                    else:
+                        error_code = (
+                            failure_exc.code if isinstance(failure_exc, AgyError)
+                            else "CANCELLED" if cancelled else "UPSTREAM"
+                        )
                     if not temporary and not self.stopped:
                         if cancelled or error_code == "CANCELLED":
                             tombstone_reason = "abort"
@@ -860,7 +925,8 @@ class Runtime:
                         status="cancelled" if cancelled else "error",
                         error_code=error_code,
                     )
-                    await session.close()
+                    if not retain_for_late_result:
+                        await session.close()
                 elif local_meter.context["upstream_compaction_detected"]:
                     # Delivery/host tool continuations have reached a terminal
                     # state. Never retire midway through a tool side effect.

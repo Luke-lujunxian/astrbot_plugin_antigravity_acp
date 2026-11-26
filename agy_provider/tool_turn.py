@@ -4,7 +4,6 @@ import asyncio
 import copy
 
 from .errors import AgyError
-from .messages import canonical_calls
 from .transport import Event
 
 
@@ -16,9 +15,6 @@ def _continuation_exchange(messages, baseline, call, text):
     or an exchange already accepted by this turn; foreign results are rejected.
     Inputs have already been normalized and checked for closed, unique IDs.
     """
-    expected = canonical_calls(
-        [{"id": call.id, "function": {"name": call.name, "arguments": call.arguments}}]
-    )
     calls_at, results_at = [], []
     for index, message in enumerate(messages):
         calls_at.extend(
@@ -29,8 +25,7 @@ def _continuation_exchange(messages, baseline, call, text):
     if (
         calls_at != [len(messages) - 2]
         or results_at != [len(messages) - 1]
-        or messages[-2]
-        != {"role": "assistant", "content": text, "tool_calls": expected}
+        or messages[-2] != call.assistant_message(text)
     ):
         raise AgyError(
             "TOOL_HISTORY", "工具续轮缺少唯一、完整且匹配的已审计调用/结果。"
@@ -160,6 +155,7 @@ class ToolTurn:
             request_fingerprint=self.request_fingerprint,
             claimed_half_open=self.claimed_half_open,
             allow_builtins=self.allow_builtins,
+            host_signal=self.signal,
         )
         final_status = "error"
         final_code = "TOOL_PROTOCOL"
@@ -189,9 +185,14 @@ class ToolTurn:
                             + self.runtime.settings.tool_execution_timeout
                         ):
                             done, _ = await asyncio.wait(
-                                (resumed, failed, event.result["call"].future),
+                                (resumed, failed, call.future),
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
+                            if call.execution_timed_out:
+                                raise AgyError(
+                                    "TOOL_TIMEOUT", "宿主工具执行超时；不会自动重放。",
+                                    no_retry=True, no_fallback=True,
+                                )
                             if failed in done:
                                 raise event.result["client"].failed
                             if not self.resume.is_set():
@@ -347,14 +348,27 @@ async def chat_events(
     finalizing: bool = False,
 ):
     """Per-entry lock releases on host handoff; retained job owns original lease."""
+    result_tail = request.messages[-1]["role"] == "tool"
+    session = runtime.sessions.get(key)
+    late_tool_result = result_tail and (
+        request.messages[-1]["tool_call_id"] in runtime.tool_timeouts
+        or (session is not None and session.timed_out_tool is not None)
+    )
+    if late_tool_result and (
+        key in runtime.entry_locks or key in runtime.turns
+        or session is None or session.timed_out_tool is None
+    ):
+        raise AgyError(
+            "TOOL_TIMEOUT", "原工具执行已超时，迟到结果无法回填或已在处理。",
+            no_retry=True, no_fallback=True,
+        )
     if key in runtime.entry_locks:
         raise AgyError("BUSY", "同一聊天入口正在处理。")
     runtime.entry_locks[key] = True
     turn = runtime.turns.get(key)
     try:
-        result_tail = request.messages[-1]["role"] == "tool"
-        if finalizing:
-            if result_tail and (turn or key not in runtime.sessions):
+        if finalizing or late_tool_result:
+            if result_tail and not late_tool_result and (turn or session is None):
                 raise AgyError("TOOL_STALE", "没有可重建的无工具收尾会话，拒绝旧工具结果。")
             if turn:
                 if signal is not turn.signal:
@@ -371,7 +385,9 @@ async def chat_events(
                 request_fingerprint=request_fingerprint,
                 continuation=result_tail or (meter is not None and meter.tool_result_supplied),
                 claimed_half_open=claimed_half_open,
-                finalization_signal=signal,
+                host_signal=signal,
+                finalizing=finalizing,
+                late_tool_result=late_tool_result,
             )
         elif turn:
             if signal is None or signal is not turn.signal:

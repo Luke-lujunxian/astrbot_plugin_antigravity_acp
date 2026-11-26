@@ -38,14 +38,21 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch("agy_provider.sessions.discover", AsyncMock(return_value=LaunchInfo("fake", "1.5.9", False))))
         self.enterContext(patch("agy_provider.sessions.launch_args", return_value=[sys.executable, str(Path(__file__).with_name("fake_tool_cli.py"))]))
 
-    async def max_steps_runner(self, *, builtins=False):
+    async def tool_runner(self, *, builtins=False, execution_timeout=2):
+        class RunnerResponse(Response):
+            is_chunk = False
+
         stubs = _load_provider_module(self.root)
-        stubs["astrbot.core.provider.entities"].LLMResponse = Response
+        stubs["astrbot.core.provider.entities"].LLMResponse = RunnerResponse
         self.enterContext(patch.dict(sys.modules, stubs))
         sys.modules.pop("agy_provider.provider", None)
         self.addCleanup(sys.modules.pop, "agy_provider.provider", None)
         module = importlib.import_module("agy_provider.provider")
-        module.configure(replace(self.settings, builtin_search_web="allow" if builtins else "deny"))
+        module.configure(replace(
+            self.settings,
+            builtin_search_web="allow" if builtins else "deny",
+            tool_execution_timeout=execution_timeout,
+        ))
         self.addCleanup(module.configure, Settings())
         provider = module.AgyProvider({"id": "p", "model": "gemini-test"}, {})
         self.addAsyncCleanup(provider.terminate)
@@ -60,21 +67,27 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.dict(os.environ, {"AGY_TEST_LOG": str(log)}))
         launches = self.enterContext(patch("agy_provider.sessions.launch_args", side_effect=launch))
 
-        class Runner(runner_type()):
+        class Runner(runner_type(os.environ.get("AGY_HOST_RUNNER_SOURCE"))):
             MAX_STEPS_REACHED_PROMPT = "Step budget exhausted. Summarize the results."
+            EMPTY_OUTPUT_RETRY_ATTEMPTS = 3
+            EMPTY_OUTPUT_RETRY_WAIT_MIN_S, EMPTY_OUTPUT_RETRY_WAIT_MAX_S = 1, 4
 
             async def _iter_llm_responses(self, **kwargs):
                 if self.provider is not provider:
                     self.provider.calls += 1
-                    yield Response(role="assistant", completion_text="fallback")
+                    yield Response(role="assistant", completion_text="fallback", is_chunk=False)
                     return
-                async for response in provider.text_chat_stream(
+                stream = provider.text_chat_stream(
                     contexts=self.run_context.messages,
                     session_id="max-steps",
                     func_tool=self.req.func_tool,
                     abort_signal=self._abort_signal,
-                ):
-                    yield response
+                )
+                try:
+                    async for response in stream:
+                        yield response
+                finally:
+                    await stream.aclose()
 
         install_host_compat(Runner, owner=module.OWNER, logger=Mock())
         self.addCleanup(uninstall_host_compat, Runner)
@@ -85,7 +98,7 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
         )])
         runner.req = SimpleNamespace(func_tool=toolset)
         runner.provider = provider
-        fallback = SimpleNamespace(calls=0)
+        fallback = SimpleNamespace(calls=0, provider_config={"id": "fallback"})
         runner.fallback_providers = [fallback]
         runner._abort_signal = asyncio.Event()
         runner._step_budget_max = runner._step_budget_used = 12
@@ -95,6 +108,10 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
         runner.run_context.messages.extend(self.exchange(
             call.tools_call_ids[0], call.tools_call_args[0], "completed tool result",
         ))
+        return runner, provider, fallback, launches, log
+
+    async def max_steps_runner(self, *, builtins=False):
+        runner, provider, fallback, launches, log = await self.tool_runner(builtins=builtins)
         runner.req.func_tool = None
         runner._step_budget_used += 1
         runner.run_context.messages.append({
@@ -104,7 +121,15 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     async def run_step(runner):
-        return [response async for response in runner._iter_llm_responses_with_fallback()]
+        responses = [response async for response in runner._iter_llm_responses_with_fallback()]
+        runtime = getattr(runner.provider, "runtime", None)
+        if runtime is not None:
+            # The native fallback iterator returns at the final response. Let
+            # its async generator finalizers release the per-request lock.
+            async with asyncio.timeout(5):
+                while runtime.entry_locks:
+                    await asyncio.sleep(0.01)
+        return responses
 
     @staticmethod
     def exchange(call_id, arguments, result):
@@ -119,6 +144,94 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
     def prompts(log):
         events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
         return [event for event in events if event["event"] == "prompt"]
+
+    async def timed_out_runner(self):
+        runner, provider, fallback, launches, log = await self.tool_runner(
+            builtins=True, execution_timeout=1,
+        )
+        key, turn = next(iter(provider.runtime.turns.items()))
+        call = turn.waiting["call"]
+        async with asyncio.timeout(5):
+            await turn.task
+        self.assertTrue(call.execution_timed_out)
+        self.assertTrue(call.future.cancelled())
+        self.assertEqual(provider.runtime.tool_outcomes[call.id], "unknown")
+        record = provider.runtime.telemetry.history[-1]
+        self.assertEqual((record["status"], record["error_code"]), ("error", "TOOL_TIMEOUT"))
+        self.assertTrue(record["tool_handed_off"])
+        self.assertFalse(provider.runtime.turns)
+        return runner, provider, fallback, launches, log, key
+
+    async def assert_late_result_rejected(self, runner, fallback):
+        with self.assertRaises(AgyError) as caught:
+            _ = [response async for response in runner._iter_llm_responses()]
+        self.assertEqual(caught.exception.code, "TOOL_TIMEOUT")
+        self.assertTrue(caught.exception.no_retry and caught.exception.no_fallback)
+        self.assertNotIn("进程重载", str(caught.exception))
+        result = await self.run_step(runner)
+        self.assertEqual(result[-1].role, "err")
+        self.assertIn("[TOOL_TIMEOUT]", result[-1].completion_text)
+        self.assertEqual(fallback.calls, 0)
+
+    async def test_late_tool_result_rebuilds_without_tools_once(self):
+        runner, provider, fallback, launches, log, key = await self.timed_out_runner()
+        old_client = provider.runtime.sessions[key].client
+        self.assertTrue(old_client.alive)
+        result = await self.run_step(runner)
+        self.assertEqual(result[-1].completion_text, "reply:1")
+        self.assertFalse(getattr(result[-1], "tools_call_ids", None))
+        self.assertEqual(fallback.calls, 0)
+        self.assertFalse(old_client.alive)
+        self.assertIsNone(provider.runtime.sessions[key].broker)
+        await self.assert_late_result_rejected(runner, fallback)
+        self.assertEqual([c.kwargs["use_default_agent"] for c in launches.call_args_list], [True, False])
+        prompts = self.prompts(log)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("completed tool result", "".join(prompts[0]["texts"]))
+
+    async def test_late_tool_result_rejects_foreign_run_and_rewritten_history(self):
+        runner, _, fallback, launches, _, _ = await self.timed_out_runner()
+        signal = runner._abort_signal
+        runner._abort_signal = asyncio.Event()
+        await self.assert_late_result_rejected(runner, fallback)
+        runner._abort_signal = signal
+
+        runner.run_context.messages[0] = {"role": "user", "content": "changed question"}
+        await self.assert_late_result_rejected(runner, fallback)
+        runner.run_context.messages[0] = {"role": "user", "content": "echo"}
+        runner.run_context.messages[-2]["tool_calls"][0]["function"]["arguments"] = {"value": "changed"}
+        await self.assert_late_result_rejected(runner, fallback)
+        self.assertEqual(launches.call_count, 1)
+
+    async def test_late_tool_result_rejects_dead_session(self):
+        runner, provider, fallback, launches, _, key = await self.timed_out_runner()
+        await provider.runtime.sessions[key].client.close()
+        # The pool can remove the dead session before the host returns.
+        async with provider.runtime.lease(key, temporary=False):
+            pass
+        self.assertNotIn(key, provider.runtime.sessions)
+        await self.assert_late_result_rejected(runner, fallback)
+        self.assertEqual(launches.call_count, 1)
+
+    async def test_late_tool_result_is_consumed_even_when_generation_fails(self):
+        runner, _, fallback, launches, log, _ = await self.timed_out_runner()
+        scenario = self.root / "scenario"
+        scenario.write_text("empty", encoding="utf-8")
+        with patch.dict(os.environ, {"AGY_SCENARIO_FILE": str(scenario)}):
+            failed = await self.run_step(runner)
+        self.assertEqual(failed[-1].role, "err")
+        self.assertIn("[EMPTY]", failed[-1].completion_text)
+        await self.assert_late_result_rejected(runner, fallback)
+        self.assertEqual(launches.call_count, 2)
+        self.assertEqual(len(self.prompts(log)), 1)
+
+    async def test_tool_result_without_timeout_still_rejects_stale_history(self):
+        runner, provider, fallback, launches, _ = await self.tool_runner()
+        await next(iter(provider.runtime.turns.values())).close()
+        stale = await self.run_step(runner)
+        self.assertIn("[TOOL_STALE]", stale[-1].completion_text)
+        self.assertEqual(fallback.calls, 0)
+        self.assertEqual(launches.call_count, 1)
 
     async def test_max_steps_retires_pending_tool_prompt_and_summarizes_without_tools(self):
         runner, provider, fallback, launches, log = await self.max_steps_runner(builtins=True)
