@@ -78,7 +78,7 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 
 若许可已通过但没有 tools/call，继续查 CLI/relay；若已到宿主，检查原始参数 schema、预算、审批与回填，不再归因“一次性许可被取消”。不要把 #12 的离线/回声桩结论扩大到所有生产工具和 QQ 链路。
 
-已识别的内置工具被拒且尚无正文、工具交接或执行时，Provider 可用一条本地提示结束这轮，对话可继续。CLI 可能直接结束 prompt，插件不重发。遇到 search_web 时优先使用宿主 MCP 搜索。实际运行边界见[工具策略](api.md#工具策略)。
+已识别的内置工具被拒且尚无正文、工具交接或执行时，Provider 可用一条本地提示结束这轮，对话可继续（仅 `search_web` 提示搜索请求可能已发出，其余非搜索内置工具使用非搜索拒止文案）。CLI 可能直接结束 prompt，插件不重发。遇到 `search_web` 时优先使用宿主 MCP 搜索。实际运行边界与 `1.5.18` 实测结论见[工具策略](api.md#工具策略)与 [原生工具调查报告](issue41-builtin-tools-probe.md)。
 
 入口：[transport.py](../agy_provider/transport.py)、[tools.py](../agy_provider/tools.py)、[tool_turn.py](../agy_provider/tool_turn.py)、[sessions.py](../agy_provider/sessions.py)。测试：`tests.test_mcp_permissions`、`tests.test_permission_attribution`、`tests.test_tool_pipeline`。
 
