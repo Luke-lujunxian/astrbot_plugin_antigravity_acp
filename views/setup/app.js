@@ -66,6 +66,13 @@ const quotaWindowLabels = {
   monthly: "月窗口",
 };
 
+const quotaBucketNameLabels = {
+  "Weekly Limit Remaining": "每周剩余",
+  "Five Hour Limit Remaining": "5 小时剩余",
+  "Daily Limit Remaining": "每日剩余",
+  "Monthly Limit Remaining": "每月剩余",
+};
+
 const toolPolicyChoiceLabels = {
   deny: "拒绝",
   allow_once: "单次允许",
@@ -716,6 +723,22 @@ function renderAlerts(data) {
   const scopeWarning = typeof data.command_scope_warning === "string" ? data.command_scope_warning.trim() : "";
   scopeAlert.textContent = scopeWarning;
   scopeAlert.hidden = !scopeWarning;
+
+  const setupAlert = $("setup-guide-alert");
+  if (setupAlert) {
+    const needsOnboarding = !data.busy && !activeLogin(data.login)
+      && data.report?.status === "blocked" && !providers.length;
+    if (needsOnboarding) {
+      const span = el("span", "", "尚未完成运行环境检测或账号认证，请先前往「环境与认证」完成初始配置。");
+      const btn = el("button", "btn btn-sm", "前往配置 →");
+      btn.type = "button";
+      btn.addEventListener("click", () => switchTab("setup"));
+      setupAlert.replaceChildren(span, btn);
+      setupAlert.hidden = false;
+    } else {
+      setupAlert.hidden = true;
+    }
+  }
 }
 
 function renderMonitor(data) {
@@ -770,6 +793,11 @@ function renderMonitor(data) {
 
     if (row.runtime_state !== "active") {
       card.append(el("p", "monitor-empty", "已配置未初始化，暂无运行统计。"));
+    } else if ((summary?.total_turns ?? 0) === 0 && !recent.length) {
+      const activeSess = pool ? monitorCount(pool.active_sessions) : "0";
+      const maxSess = pool ? monitorCount(pool.max_sessions) : "未知";
+      const liveProc = pool ? monitorCount(pool.live_processes) : "0";
+      card.append(el("p", "monitor-empty", `已就绪，近 24h 暂无请求样本 · 会话 ${activeSess} / ${maxSess} · 存活进程 ${liveProc}`));
     } else {
       const overview = el("div", "monitor-overview");
 
@@ -962,7 +990,14 @@ function renderQuota(nextData) {
       const head = el("div", "quota-group-head");
       head.append(el("h3", "quota-group-title", group.name || "未命名额度池"));
       const shared = Array.isArray(group.models_shared) ? group.models_shared.filter(Boolean) : [];
-      if (shared.length) {
+      if (shared.length > 3) {
+        const drawer = el("details", "quota-models-drawer");
+        drawer.append(el("summary", "small", `适用 ${shared.length} 个模型`));
+        const chips = el("div", "quota-models");
+        shared.forEach(modelName => chips.append(el("span", "quota-model-chip", modelName)));
+        drawer.append(chips);
+        head.append(drawer);
+      } else if (shared.length) {
         const chips = el("div", "quota-models");
         shared.forEach(modelName => chips.append(el("span", "quota-model-chip", modelName)));
         head.append(chips);
@@ -984,7 +1019,8 @@ function renderQuota(nextData) {
 
           const bHead = el("div", "quota-bucket-head");
           const titleWrap = el("div", "quota-bucket-title");
-          titleWrap.append(el("span", "", bucket.name || bucket.id || "额度窗口"));
+          const rawBucketName = bucket.name || bucket.id || "额度窗口";
+          titleWrap.append(el("span", "", quotaBucketNameLabels[rawBucketName] || rawBucketName));
           if (winLabel) titleWrap.append(el("span", "badge", winLabel));
           const pctEl = el("span", "quota-pct", frac.text);
           pctEl.dataset.level = frac.level;
@@ -1733,7 +1769,8 @@ function renderToolPolicy() {
     if (secInfo.desc) gHead.append(el("p", "small", secInfo.desc));
     groupEl.append(gHead);
 
-    const ul = el("div", "tool-list");
+    const primaryRows = [];
+    const lockedUnsupportedRows = [];
     items.forEach((tool) => {
       const row = el("article", "tool-row");
       const top = el("div", "tool-row-top");
@@ -1869,10 +1906,29 @@ function renderToolPolicy() {
         row.append(el("div", "tool-risk-note", "仅限隔离工作区顶层 .txt，单次授权与 MCP 共用调用次数上限。"));
       }
 
-      ul.append(row);
+      if (isLockedDeny && tool.capability === "unsupported") {
+        lockedUnsupportedRows.push(row);
+      } else {
+        primaryRows.push(row);
+      }
     });
 
-    groupEl.append(ul);
+    if (primaryRows.length > 0 && lockedUnsupportedRows.length > 0) {
+      const ul = el("div", "tool-list");
+      primaryRows.forEach((row) => ul.append(row));
+      const drawer = el("details", "drawer tool-locked-drawer");
+      drawer.append(el("summary", "", `固定拒绝的内置工具（${lockedUnsupportedRows.length} 项）`));
+      const drawerBody = el("div", "drawer-body");
+      const lockedUl = el("div", "tool-list");
+      lockedUnsupportedRows.forEach((row) => lockedUl.append(row));
+      drawerBody.append(lockedUl);
+      drawer.append(drawerBody);
+      groupEl.append(ul, drawer);
+    } else {
+      const ul = el("div", "tool-list");
+      [...primaryRows, ...lockedUnsupportedRows].forEach((row) => ul.append(row));
+      groupEl.append(ul);
+    }
     groupNodes.push(groupEl);
   }
 

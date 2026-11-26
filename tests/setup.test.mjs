@@ -1376,3 +1376,121 @@ test("string-only bridge decodes [AGY:CODE] across all panel branches, prevents 
   await ui.api.refreshQuotaManual();
   assert.equal(ui.get("quota-alert").textContent, "额度刷新请求失败，请稍后重试。");
 });
+
+test("setup-guide-alert guides blocked unauthenticated users to setup tab and hides once ready", async () => {
+  const blocked = {
+    ...base(),
+    report: {status: "blocked", stage: "cli", cli_version: "", selected_model: "", models: [], efforts: []},
+    login: {state: "idle", busy: false, owned: false, url: "", ticket: ""},
+    providers: [],
+  };
+  const ui = await boot(blocked);
+  const guideAlert = ui.get("setup-guide-alert");
+  assert.equal(guideAlert.hidden, false);
+  const guideNodes = collectNodes(guideAlert);
+  assert.match(guideNodes.map(n => n.textContent).join(" "), /环境与认证/);
+  const jumpBtn = guideNodes.find(n => n.tag === "button" && n.textContent.includes("前往配置"));
+  assert.ok(jumpBtn);
+  jumpBtn.click();
+  assert.equal(ui.get("tab-setup").hidden, false);
+  assert.equal(ui.get("tab-monitor").hidden, true);
+
+  ui.api.render({...blocked, report: base().report});
+  assert.equal(guideAlert.hidden, true);
+
+  ui.api.render({...blocked, providers: [{provider_id: "agy-main", model: "gemini-test", enabled: true}]});
+  assert.equal(guideAlert.hidden, true);
+});
+
+test("active 0-turn monitor card renders compact single-line status while non-empty turns keep KPI grid", async () => {
+  const ui = await boot();
+  const hasClass = (node, cls) => String(node.className || "").split(/\s+/).includes(cls);
+  const emptyMon = monitorPayload();
+  ui.api.renderMonitor(emptyMon);
+  const cardsEmpty = collectNodes(ui.get("monitor-instances")).filter(n => n.tag === "article");
+  assert.equal(cardsEmpty.length, 1);
+  const emptyNodes = collectNodes(cardsEmpty[0]);
+  assert.ok(emptyNodes.some(n => hasClass(n, "monitor-empty") && /已就绪，近 24h 暂无请求样本/.test(n.textContent)));
+  assert.equal(emptyNodes.some(n => hasClass(n, "kpi-grid")), false);
+
+  const activeMon = monitorPayload();
+  activeMon.instances[0].summary.total_turns = 2;
+  activeMon.instances[0].summary.request_sent_turns = 2;
+  activeMon.instances[0].summary.success_turns = 2;
+  ui.api.renderMonitor(activeMon);
+  const activeNodes = collectNodes(ui.get("monitor-instances"));
+  assert.ok(activeNodes.some(n => hasClass(n, "kpi-grid")));
+  assert.equal(activeNodes.some(n => hasClass(n, "monitor-empty")), false);
+});
+
+test("quota panel localizes English bucket names and collapses model lists longer than 3", async () => {
+  const ui = await boot();
+  const hasClass = (node, cls) => String(node.className || "").split(/\s+/).includes(cls);
+  ui.api.renderQuota({
+    schema_version: 1,
+    status: "ok",
+    capability: "supported",
+    fetched_at: "2099-11-26T10:00:00Z",
+    stale: false,
+    error: null,
+    groups: [
+      {
+        name: "Gemini",
+        models_shared: ["M1", "M2", "M3", "M4"],
+        buckets: [
+          {id: "w", name: "Weekly Limit Remaining", window: "weekly", remaining_fraction: 0.9, reset_time: "2099-12-03T08:00:00Z"},
+          {id: "5h", name: "Five Hour Limit Remaining", window: "five_hour", remaining_fraction: 0.8, reset_time: "2099-11-26T13:00:00Z"},
+        ],
+      },
+      {
+        name: "Compact",
+        models_shared: ["C1", "C2"],
+        buckets: [
+          {id: "d", name: "Daily Limit Remaining", window: "daily", remaining_fraction: 1.0, reset_time: null},
+          {id: "m", name: "Monthly Limit Remaining", window: "monthly", remaining_fraction: 1.0, reset_time: null},
+        ],
+      },
+    ],
+  });
+  const nodes = collectNodes(ui.get("quota-body"));
+  const text = nodes.map(n => n.textContent).join(" ");
+  assert.match(text, /每周剩余/);
+  assert.match(text, /5 小时剩余/);
+  assert.match(text, /每日剩余/);
+  assert.match(text, /每月剩余/);
+  assert.doesNotMatch(text, /Weekly Limit Remaining|Five Hour Limit Remaining/);
+  const drawers = nodes.filter(n => n.tag === "details" && hasClass(n, "quota-models-drawer"));
+  assert.equal(drawers.length, 1);
+  assert.match(collectNodes(drawers[0]).find(n => n.tag === "summary").textContent, /适用 4 个模型/);
+});
+
+test("tool policy folds locked unsupported builtins into drawer only when group has primary items", async () => {
+  const hasClass = (node, cls) => String(node.className || "").split(/\s+/).includes(cls);
+  const ui = await boot({
+    ...base(),
+    tool_policy: {
+      enable_tools: true,
+      reload_required: false,
+      tools: [
+        {
+          id: "read_file", source: "builtin", purpose: "读取文件", policy: "deny",
+          choices: ["deny", "allow_once"], capability: "unverified", risk: "medium", effective: false,
+        },
+        {
+          id: "write_file", source: "builtin", purpose: "写入文件", policy: "deny",
+          choices: ["deny"], capability: "unsupported", risk: "high", effective: false,
+        },
+        {
+          id: "run_command", source: "builtin", purpose: "执行命令", policy: "deny",
+          choices: ["deny"], capability: "unsupported", risk: "high", effective: false,
+        },
+      ],
+    },
+  });
+  const nodes = collectNodes(ui.get("tool-policy-list"));
+  const drawers = nodes.filter(n => n.tag === "details" && hasClass(n, "tool-locked-drawer"));
+  assert.equal(drawers.length, 1);
+  assert.equal(collectNodes(drawers[0]).find(n => n.tag === "summary").textContent, "固定拒绝的内置工具（2 项）");
+  const drawerRowIds = collectNodes(drawers[0]).filter(n => n.tag === "code").map(n => n.textContent);
+  assert.deepEqual(drawerRowIds, ["write_file", "run_command"]);
+});

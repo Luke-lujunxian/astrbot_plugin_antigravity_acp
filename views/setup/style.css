@@ -899,6 +899,41 @@ h2 {
   gap: 5px;
 }
 
+.quota-models-drawer {
+  margin-top: 2px;
+}
+
+.quota-models-drawer > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.quota-models-drawer > summary::-webkit-details-marker {
+  display: none;
+}
+
+.quota-models-drawer > summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+
+.quota-models-drawer[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.quota-models-drawer[open] > summary {
+  margin-bottom: 6px;
+}
+
 .quota-model-chip {
   padding: 2px 8px;
   border-radius: var(--radius-pill);
@@ -1337,6 +1372,19 @@ h2 {
 
 .tool-row[data-reload-pending="true"] {
   border-color: color-mix(in srgb, var(--paused) 45%, var(--border));
+}
+
+.tool-locked-drawer {
+  border-top: 0;
+  margin-top: 2px;
+}
+
+.tool-locked-drawer > summary {
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 6px 4px;
+  min-height: 36px;
 }
 
 .tool-row-top {
