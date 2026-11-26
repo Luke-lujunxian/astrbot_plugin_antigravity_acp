@@ -2,21 +2,45 @@
 
 路径均相对 AstrBot 插件视图 bridge。沿用 apiGet/apiPost 的宿主 JSON 封装，下文描述 data。面板管理员认证共用现有规则，匿名 401，API key 和非面板管理员 403，新接口停用 503。原 setup/status 在停用后被直接调用仍沿用宿主 400。响应 no-store。POST 为 application/json，必须带 setup/status 当前 csrf。聊天使用独立的 AstrBot 管理员判定。
 
+## 面板错误
+
+插件处理器返回的所有 `setup/*`、`monitor/*` HTTP 错误均保留 HTTP 状态码，JSON 使用 `{"status":"error","message":"[AGY:CODE] 人类可读说明","data":{"code":"CODE"}}`。AstrBot 4.29.4 的 iframe bridge 仅转发 `message` 字符串。前端可用 `^\[AGY:([A-Z][A-Z0-9_]*)\] ` 从 `error.message` 开头提取稳定码，展示时去掉该前缀。宿主在分发给插件前拒绝的请求仍可能只有宿主文案。
+
+| 稳定码 | HTTP | 含义 |
+| --- | --- | --- |
+| `UNAUTHENTICATED` | 401 | 缺少面板会话 |
+| `FORBIDDEN` | 403 | API key 或非配置的面板管理员 |
+| `CSRF_EXPIRED` | 403 | CSRF 缺失、无效或已过期 |
+| `LOGIN_BUSY` | 409 | 官方登录进行中，额度刷新未启动 |
+| `BUSY` | 409 | 其他并发操作冲突 |
+| `CLOSED` | 503 | 插件已停用，适用于 `monitor/*`、`setup/tool-policy`、`setup/quota-refresh` |
+| `CLOSED` | 400 | 原有 `setup/*` 接口的停用响应，包括 `setup/status` |
+| `STORAGE_UNAVAILABLE` | 503 | 本地每日统计存储不可用 |
+| `QUOTA_UNAVAILABLE` | 503 | 缺少额度服务 |
+| `CONFIG` / `UNSUPPORTED` | 400 | 请求参数或当前能力不允许该操作 |
+| `INTERNAL` | 500 | 本地操作失败，例如工具策略持久化失败 |
+
+其他已知业务异常沿用各自的 AGY 代码并返回 HTTP 400。HTTP 200 的额度快照仍通过快照内的 `error.code` 表示 CLI 查询失败。
+
 ## 工具策略
 
-GET `setup/status` 新增 `tool_policy`，POST `setup/tool-policy` 请求为 `{"csrf":"…","read_file":"deny"}` 或 allow_once，成功直接返回相同结构的 tool_policy（无外层同名字段）。失败走宿主错误，保持编辑内容。下面是字段形状，数组按后端实际清单渲染。
+GET `setup/status` 包含 `tool_policy`。POST `setup/tool-policy` 请求含 `csrf` 和至少一个工具策略字段。`read_file` 取 `deny` 或 `allow_once`，`search_web` 取 `deny` 或 `allow`，可单独保存或一同提交。例如 `{"csrf":"…","search_web":"allow"}`。只提交 `read_file` 的旧请求仍有效。成功直接返回相同结构的工具策略对象。下面是字段形状，数组按后端实际清单渲染。
 
 ```json
 {"enable_tools":true,"reload_required":false,"tools":[
-  {"id":"astrbot_mcp","source":"mcp","purpose":"宿主提供的工具","risk":"host","capability":"supported","choices":[],"policy":"allow_once","effective":true},
-  {"id":"read_file","source":"builtin","purpose":"读取隔离工作区的普通文本文件","risk":"high","capability":"supported","choices":["deny","allow_once"],"policy":"deny","effective":false},
-  {"id":"search_web","source":"builtin","purpose":"联网搜索","risk":"network","capability":"unsupported","choices":["deny"],"policy":"deny","effective":false}
+  {"id":"astrbot_mcp","source":"mcp","purpose":"宿主提供的工具","risk":"host","capability":"supported","choices":[],"policy":"allow_once","effective":true,"reload_required":false},
+  {"id":"read_file","source":"builtin","purpose":"读取隔离工作区顶层文本文件","risk":"high","capability":"supported","choices":["deny","allow_once"],"policy":"deny","effective":false,"reload_required":false},
+  {"id":"search_web","source":"builtin","purpose":"联网搜索","risk":"network","capability":"experimental","choices":["deny","allow"],"policy":"deny","effective":false,"reload_required":false,"pre_execution_approval":false,"enforcement":"post_observation","limitation":"CLI 自动执行搜索，无法在执行前审批。关闭时由模型护栏和事后中止限制，发现时搜索请求可能已发出。开启后按通知计入预算，超预算时中止本轮。"}
 ]}
 ```
 
-policy 为已保存策略，effective 为当前加载的全局策略在具备所需条件的工具实例是否可用。enable_tools 取当前生效值。实例 chat、缺少工具快照或宿主未启用 tool_use 时均不可用。MCP 清单由每轮宿主快照决定。read_file 仅在 Linux、CLI 版本探测及当前 ACP 握手均确认 1.5.17、strict 下开放，仅限当前私有工作区顶层普通单链接 .txt 文件；未确认时 capability=unverified、choices=["deny"]。每次绑定当前 prompt 的 ACP 请求并与 MCP 共用 tool_max_calls。其余内置项只读 deny。无身份条件授权。搜索可能在 CLI 发出通知之前已启动，插件不能提供执行前拦截保证。
+`policy` 为已保存策略，`effective` 表示当前加载的全局策略在具备所需条件的工具实例是否可用。`enable_tools` 取当前生效值。两项内置工具仅适用于现有的工具模式，要求总闸开启且本轮含非空宿主工具快照。实例 `chat`、宿主禁用 `tool_use` 或本轮 `tool_choice=none` 时均不可用。MCP 清单由每轮宿主快照决定。
 
-保存只写插件全局 `builtin_read_file`（默认 deny），重载插件后生效。总闸由宿主插件配置保存并重载，实例模式由原有 setup/provider-update 更新。两者独立。未知字段、工具或策略拒绝 400，持久化失败 500，未授权或 nonce 过期 403。
+`read_file` 仅在 Linux、CLI 版本探测及当前 ACP 握手均确认 1.5.17、`strict` 下开放，仅限当前私有工作区顶层普通单链接 `.txt` 文件。未确认时 `capability=unverified`、`choices=["deny"]`。每次授权绑定当前 prompt 的 ACP 请求并与 MCP 共用 `tool_max_calls`。
+
+`search_web` 是由官方 CLI 自动执行的实验性联网搜索。关闭时模型护栏要求避免该工具，插件在收到调用通知时中止本轮，搜索请求可能已经发出。开启时每个新搜索调用在收到通知后计入本轮工具调用次数，并与 MCP 和 `read_file` 共用 `tool_max_calls`。检测到超预算的搜索后中止本轮，已发出的请求无法撤回，预算无法保证实际联网次数。`pre_execution_approval: false`、`enforcement: "post_observation"` 和 `limitation` 说明上述限制。`run_command`、`write_file`、`browser`、`read_url`、`execute_url` 继续固定为只读 `deny`。
+
+保存请求只更新所提交的全局 `builtin_read_file`、`builtin_search_web` 键，两项默认 `deny`。工具行的 `reload_required` 表示该行已保存策略与运行态不同，任一工具行待重载即令顶层 `reload_required: true`。重载后使用新策略和护栏。持久化失败会回滚本次提交并返回 HTTP 500。仅提交 `csrf`、未知字段、工具或策略返回 HTTP 400 `CONFIG`。未验证时提交 `read_file: "allow_once"` 返回 HTTP 400 `UNSUPPORTED`。总闸由宿主插件配置保存并重载，实例模式由原有 `setup/provider-update` 更新。
 
 ## 官方 CLI 额度
 
@@ -52,7 +76,7 @@ requests 含失败、取消及本地短路，success 只计 ok，其余计 faile
 | /agy models | 已配置模型与实例 ID |
 | /agy usage [30&#124;90&#124;365] | 本地每日统计摘要及最近 28 天文本热力图，默认 90 天 |
 
-上述指令在插件启用且宿主将消息分发给插件的私聊、群聊中使用。非管理员只收到固定拒绝提示。
+上述指令在插件启用且宿主将消息分发给插件的私聊、群聊中使用。管理员发送裸 `/agy` 时显示同 `/agy help` 的帮助。非管理员发送裸 `/agy` 或已注册子指令时只收到 `AGY [FORBIDDEN] 仅管理员可使用此指令。`。额度服务在查询时停用，`/agy quota` 会提示 `AGY [CLOSED] 插件已停用。`。
 
 ## 变更记录
 

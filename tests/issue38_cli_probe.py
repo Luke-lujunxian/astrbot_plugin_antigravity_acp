@@ -44,7 +44,9 @@ async def run(args):
                 return 1
             await select(session.client, options, args.model, "low")
             marker = secrets.token_hex(8)
-            (session.broker.read_workspace / "sample.txt").write_text(marker)
+            sample = session.broker.read_workspace / "sample.txt"
+            sample.write_text(marker)
+            sample.chmod(0o600)
             parts = []
             async for event in session.client.generate("Read sample.txt using read_file. Reply with its contents."):
                 if event.kind == "text":

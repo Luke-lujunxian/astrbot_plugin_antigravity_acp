@@ -278,11 +278,17 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.request.username = ""
         for action in actions:
-            self.assertEqual((await self.call(action))["status_code"], 401)
+            self.assert_web_error(await self.call(action), 401, "UNAUTHENTICATED")
         for non_admin in ("ordinary-user", "api_key:123"):
             self.request.username = non_admin
             for action in actions:
-                self.assertEqual((await self.call(action))["status_code"], 403)
+                self.assert_web_error(await self.call(action), 403, "FORBIDDEN")
+
+    def assert_web_error(self, response, status, code):
+        self.assertEqual(response["status_code"], status)
+        self.assertEqual(response["data"], {"code": code})
+        self.assertTrue(response["message"].startswith(f"[AGY:{code}] "))
+        self.assertEqual(response["headers"]["Cache-Control"], "no-store")
 
     async def test_invalid_nonce_and_payload_types(self):
         for payload in (
@@ -293,9 +299,7 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             {"csrf": "中文"},
             {"csrf": 123},
         ):
-            self.assertEqual(
-                (await self.call("check", payload, raw=b"{}"))["status_code"], 403
-            )
+            self.assert_web_error(await self.call("check", payload, raw=b"{}"), 403, "CSRF_EXPIRED")
 
     async def test_content_type_and_body_limit(self):
         self.request.content_type = "text/plain"
@@ -366,6 +370,49 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private", str(response))
         self.assertEqual(self.service.config["builtin_read_file"], "allow_once")
 
+    async def test_search_policy_is_experimental_and_reload_applies_it(self):
+        from tests.test_main_init import FakePluginConfig
+
+        def search(policy):
+            return next(tool for tool in policy["tools"] if tool["id"] == "search_web")
+
+        self.service.config = FakePluginConfig({})
+        self.service.settings = Settings.from_dict({"enable_tools": True})
+        initial = (await self.call("status"))["data"]["tool_policy"]
+        self.assertFalse(initial["reload_required"])
+        row = search(initial)
+        self.assertEqual((row["policy"], row["effective"]), ("deny", False))
+        self.assertEqual(row["capability"], "experimental")
+        self.assertEqual(row["choices"], ["deny", "allow"])
+        self.assertIs(row["pre_execution_approval"], False)
+        self.assertEqual(row["enforcement"], "post_observation")
+        self.assertIn("可能已发出", row["limitation"])
+
+        data = {"csrf": self.service.csrf, "search_web": "allow"}
+        for invalid in ({"read_file": "allow_once"}, {"browser": "deny"}, {"search_web": "allow_once"}):
+            self.assert_web_error(await self.call("tool-policy", {**data, **invalid}), 400,
+                                  "UNSUPPORTED" if "read_file" in invalid else "CONFIG")
+        self.assertEqual(self.service.config.save_calls, 0)
+
+        result = (await self.call("tool-policy", data))["data"]
+        self.assertEqual(self.service.config, {"builtin_search_web": "allow"})
+        self.assertTrue(result["reload_required"])
+        self.assertTrue(search(result)["reload_required"])
+        self.assertEqual((search(result)["policy"], search(result)["effective"]), ("allow", False))
+        self.service.settings = Settings.from_dict({**self.service.config, "enable_tools": True})
+        self.assertFalse(self.service.policy()["reload_required"])
+        self.assertFalse(search(self.service.policy())["reload_required"])
+        self.assertTrue(search(self.service.policy())["effective"])
+
+        self.service.config.save_error = OSError("private")
+        self.assert_web_error(await self.call("tool-policy", {**data, "read_file": "deny", "search_web": "deny"}),
+                              500, "INTERNAL")
+        self.assertEqual(self.service.config, {"builtin_search_web": "allow"})
+        self.service.config.save_error = None
+        result = (await self.call("tool-policy", {**data, "read_file": "deny", "search_web": "deny"}))["data"]
+        self.assertTrue(result["reload_required"])
+        self.assertEqual((search(result)["policy"], search(result)["effective"]), ("deny", True))
+
     async def test_quota_refresh_requires_nonce_and_only_explicit_action_queries(self):
         self.service.quota.refresh = AsyncMock(return_value={"groups": []})
         self.assertEqual((await self.call("quota-refresh", {"csrf": "expired"}))["status_code"], 403)
@@ -376,6 +423,16 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.service.quota.refresh.assert_not_awaited()
         self.assertEqual((await self.call("quota-refresh"))["data"], {"groups": []})
         self.service.quota.refresh.assert_awaited_once_with(force=True)
+
+    async def test_quota_refresh_distinguishes_login_busy_and_close_race(self):
+        self.service.quota.refresh = AsyncMock(side_effect=AgyError("CLOSED", "插件已停用。"))
+        with patch.object(type(self.service.login), "busy", True):
+            self.assert_web_error(await self.call("quota-refresh"), 409, "LOGIN_BUSY")
+        self.service.quota.refresh.assert_not_awaited()
+        self.assert_web_error(await self.call("quota-refresh"), 503, "CLOSED")
+        await self.service.close()
+        self.assert_web_error(await self.call("quota-refresh"), 503, "CLOSED")
+        self.assert_web_error(await self.call("status"), 400, "CLOSED")
 
     async def test_mutual_exclusion_and_duplicate_click(self):
         gate = asyncio.Event()

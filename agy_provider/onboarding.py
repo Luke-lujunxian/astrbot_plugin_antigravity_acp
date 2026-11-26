@@ -13,6 +13,7 @@ from astrbot.api import logger
 from .builtin_tools import supports_read, tool_policy
 from .quota import QuotaService
 from .errors import AgyError
+from .web_errors import WEB_HEADERS, web_error
 from .login import LoginFlow
 from .paths import plugin_data_root
 from .probe import probe
@@ -273,29 +274,33 @@ class Onboarding:
         return self.report.get("verified_read") is True and supports_read(self.report.get("cli_version"))
 
     def policy(self):
-        saved = (self.config or {}).get("builtin_read_file", self.settings.builtin_read_file)
-        return tool_policy(self.settings, saved, self._read_supported())
+        config = self.config or {}
+        return tool_policy(
+            self.settings, config.get("builtin_read_file", self.settings.builtin_read_file),
+            self._read_supported(), config.get("builtin_search_web", self.settings.builtin_search_web),
+        )
 
     def save_policy(self, data):
-        value = data.get("read_file")
-        if set(data) != {"csrf", "read_file"} or value not in ("deny", "allow_once"):
+        changes = data.keys() - {"csrf"}
+        if ("csrf" not in data or not changes or changes - {"read_file", "search_web"}
+                or ("read_file" in changes and data["read_file"] not in ("deny", "allow_once"))
+                or ("search_web" in changes and data["search_web"] not in ("deny", "allow"))):
             raise AgyError("CONFIG", "工具策略参数无效。")
-        if value == "allow_once" and not self._read_supported():
+        if data.get("read_file") == "allow_once" and not self._read_supported():
             raise AgyError("UNSUPPORTED", "请先完成受支持 CLI 的版本检测。")
         config = self.config
         save = getattr(config, "save_config", None)
         if not callable(save):
             raise RuntimeError("无法保存插件配置。")
-        had = "builtin_read_file" in config
-        previous = config.get("builtin_read_file")
-        config["builtin_read_file"] = value
+        updates = {f"builtin_{name}": data[name] for name in ("read_file", "search_web") if name in changes}
+        previous = {key: config[key] for key in updates if key in config}
         try:
+            config.update(updates)
             save()
         except Exception:
-            if had:
-                config["builtin_read_file"] = previous
-            else:
-                del config["builtin_read_file"]
+            for key in updates.keys() - previous.keys():
+                config.pop(key, None)
+            config.update(previous)
             raise
         return self.policy()
 
@@ -585,18 +590,15 @@ class Onboarding:
             self.routes.append((route, handler))
 
     async def handle(self, action):
-        from astrbot.api.web import error_response, json_response, request
+        from astrbot.api.web import json_response, request
 
-        headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
         # Dashboard 在分发前会校验会话；此处再次校验身份以防直接调用。
         if not request.username:
-            return error_response("请先登录 AstrBot 管理面板。", status_code=401, headers=headers)
+            return web_error("UNAUTHENTICATED", "请先登录 AstrBot 管理面板。", 401)
         if not dashboard_admin(self.context.provider_manager, request.username):
-            return error_response("仅 AstrBot 面板管理员可使用设置页面。", status_code=403, headers=headers)
+            return web_error("FORBIDDEN", "仅 AstrBot 面板管理员可使用设置页面。", 403)
         try:
             if self.closed:
-                if action in ("tool-policy", "quota-refresh"):
-                    return error_response("插件已停用。", status_code=503, headers=headers)
                 raise AgyError("CLOSED", "插件已停用。")
             if action != "status":
                 if (request.content_type or "").split(";", 1)[0].strip().lower() != "application/json":
@@ -611,18 +613,20 @@ class Onboarding:
                     or not data["csrf"].isascii()
                     or not secrets.compare_digest(data["csrf"], self.csrf)
                 ):
-                    return error_response("页面已过期，请刷新后重试。", status_code=403, headers=headers)
+                    return web_error("CSRF_EXPIRED", "页面已过期，请刷新后重试。", 403)
                 model = data.get("model", "")
                 if not isinstance(model, str) or len(model) > 1024:
                     raise AgyError("CONFIG", "模型 ID 无效。")
                 if action == "tool-policy":
-                    return json_response(self.save_policy(data), headers=headers)
+                    return json_response(self.save_policy(data), headers=WEB_HEADERS)
                 if action == "quota-refresh":
                     if set(data) != {"csrf"}:
                         raise AgyError("CONFIG", "额度刷新不接受附加参数。")
+                    if self.quota.closed:
+                        raise AgyError("CLOSED", "插件已停用。")
                     if self.login.busy:
-                        raise AgyError("BUSY", "登录中，请稍后刷新。")
-                    return json_response(await self.quota.refresh(force=True), headers=headers)
+                        return web_error("LOGIN_BUSY", "登录中，请稍后刷新。", 409)
+                    return json_response(await self.quota.refresh(force=True), headers=WEB_HEADERS)
                 if action == "provider-repair":
                     self._available()
                     if data.keys() == {"csrf", "all"} and data.get("all") is True:
@@ -644,7 +648,7 @@ class Onboarding:
                         if data.keys() != {"csrf", "provider_id"}:
                             raise AgyError("CONFIG", "实例操作参数无效。")
                         impact = provider_impact(self.context.provider_manager, provider_id, self.overrides)
-                        return json_response({"impact": impact}, headers=headers)
+                        return json_response({"impact": impact}, headers=WEB_HEADERS)
                     if action == "provider-update":
                         if data.keys() != {"csrf", "provider_id", "model", "effort", "tools_mode"}:
                             raise AgyError("CONFIG", "实例编辑参数无效。")
@@ -708,11 +712,16 @@ class Onboarding:
                         data.get("tools_mode"),
                         data.get("create_only", False),
                     )
-            return json_response(self.snapshot(request.username), headers=headers)
+            return json_response(self.snapshot(request.username), headers=WEB_HEADERS)
         except AgyError as exc:
-            return error_response(str(exc), status_code=409 if exc.code == "BUSY" else 400, headers=headers)
+            status_code = 400
+            if exc.code == "BUSY":
+                status_code = 409
+            elif exc.code == "CLOSED" and action in ("tool-policy", "quota-refresh"):
+                status_code = 503
+            return web_error(exc.code, exc.public_message, status_code)
         except Exception:
-            return error_response("AGY 本地操作失败，请重新检测或查看插件配置。", status_code=500, headers=headers)
+            return web_error("INTERNAL", "AGY 本地操作失败，请重新检测或查看插件配置。", 500)
 
     async def close(self):
         self.closed = True

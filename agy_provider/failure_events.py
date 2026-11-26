@@ -15,7 +15,10 @@ TTL = 7 * 86400
 MAX_EVENTS = 128
 MAX_BYTES = 65536
 FAILURES = {"error", "cancelled", "short_circuited"}
-FALLBACK_REASONS = {"policy_denial", "builtin_grant", "tool_handoff", "tool_continuation", "visible_prefix", "no_visible_prefix"}
+FALLBACK_REASONS = {
+    "policy_denial", "builtin_grant", "builtin_observed", "tool_handoff",
+    "tool_continuation", "visible_prefix", "no_visible_prefix",
+}
 STOP_REASONS = {"end_turn", "max_tokens", "cancelled", "error", "failed", "failure",
                 "agent_error", "execution_error", "internal_error"}
 

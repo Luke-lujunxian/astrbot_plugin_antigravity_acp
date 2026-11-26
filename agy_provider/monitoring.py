@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from .onboarding import PLUGIN_NAME
 from .routing import dashboard_admin, routing_snapshot
 from .telemetry import daily_snapshot, failure_snapshot
+from .web_errors import WEB_HEADERS, web_error
 
 
 class Monitoring:
@@ -25,32 +26,33 @@ class Monitoring:
             self.routes.append((route, handler))
 
     async def handle(self, resource="status"):
-        from astrbot.api.web import error_response, json_response, request
+        from astrbot.api.web import json_response, request
         from .provider import instance_monitor_snapshots
 
-        headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
         # AstrBot authenticates the dashboard session before dispatch. Its
         # dashboard has one configured admin username, not a chat-platform ID.
         # Check that identity again; unknown host auth configuration fails closed.
         username = request.username
         if not username:
-            return error_response("请先登录 AstrBot 管理面板。", status_code=401, headers=headers)
+            return web_error("UNAUTHENTICATED", "请先登录 AstrBot 管理面板。", 401)
         manager = self.context.provider_manager
         if not dashboard_admin(manager, username):
-            return error_response("仅 AstrBot 面板管理员可查看运行概览。", status_code=403, headers=headers)
+            return web_error("FORBIDDEN", "仅 AstrBot 面板管理员可查看运行概览。", 403)
         if self.closed:
-            return error_response("插件已停用。", status_code=503, headers=headers)
+            return web_error("CLOSED", "插件已停用。", 503)
         try:
             if resource == "quota":
                 if self.quota is None:
-                    return error_response("额度服务尚未就绪。", status_code=503, headers=headers)
-                return json_response(self.quota.snapshot(), headers=headers)
+                    return web_error("QUOTA_UNAVAILABLE", "额度服务尚未就绪。", 503)
+                if self.quota.closed:
+                    return web_error("CLOSED", "插件已停用。", 503)
+                return json_response(self.quota.snapshot(), headers=WEB_HEADERS)
             if resource.startswith("daily/"):
                 try:
                     payload = daily_snapshot(int(resource.split("/")[1]))
                 except (OSError, sqlite3.Error):
-                    return error_response("每日统计存储不可用。", status_code=503, headers=headers)
-                return json_response(payload, headers=headers)
+                    return web_error("STORAGE_UNAVAILABLE", "每日统计存储不可用。", 503)
+                return json_response(payload, headers=WEB_HEADERS)
             # No await within collection: all runtime/telemetry mutations run
             # on the same event loop, so these fields share one consistent view.
             payload = {
@@ -61,9 +63,9 @@ class Monitoring:
                 "window": {"hours": 24, "max_turns_per_instance": 100},
                 "instances": instance_monitor_snapshots(manager),
             }
-            return json_response(payload, headers=headers)
+            return json_response(payload, headers=WEB_HEADERS)
         except Exception:
-            return error_response("暂时无法读取监控数据。", status_code=500, headers=headers)
+            return web_error("INTERNAL", "暂时无法读取监控数据。", 500)
 
     async def close(self):
         self.closed = True

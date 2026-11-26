@@ -76,6 +76,20 @@ class QuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await b)["groups"], self.groups)
         self.query.assert_awaited_once()
 
+    async def test_close_reports_closed_to_active_refresh_waiter(self):
+        started = asyncio.Event()
+
+        async def query(*args):
+            started.set()
+            await asyncio.Event().wait()
+
+        self.query.side_effect = query
+        waiter = asyncio.create_task(self.service.refresh())
+        await started.wait()
+        await self.service.close()
+        with self.assertRaisesRegex(AgyError, "CLOSED"):
+            await waiter
+
     async def test_account_change_inflight_and_unobservable_keyring(self):
         async def switch(*_):
             self.environment.return_value = (("new",), True)

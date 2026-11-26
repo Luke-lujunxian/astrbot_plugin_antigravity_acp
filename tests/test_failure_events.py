@@ -105,8 +105,11 @@ def _install_web_and_entities_stubs(saved_modules):
     def _json_response(data, status_code=200, headers=None):
         return {"status_code": status_code, "headers": dict(headers or {}), "data": copy.deepcopy(data)}
 
-    def _error_response(message, status_code=400, headers=None):
-        return {"status_code": status_code, "headers": dict(headers or {}), "data": {"message": message}}
+    def _error_response(message, status_code=400, data=None, headers=None):
+        payload = {"message": message}
+        if data:
+            payload.update(data)
+        return {"status_code": status_code, "headers": dict(headers or {}), "data": payload}
 
     web_mod.json_response = _json_response
     web_mod.error_response = _error_response
@@ -388,8 +391,16 @@ class FailureEventsAndReadOnlyTests(unittest.IsolatedAsyncioTestCase):
 
             return decorator
 
+        def fake_custom_filter(filter_type):
+            def decorator(fn):
+                fn.command_filter = filter_type()
+                return fn
+            return decorator
+
         filter_obj = types.SimpleNamespace(
             command_group=fake_command_group,
+            custom_filter=fake_custom_filter,
+            CustomFilter=object,
             permission_type=lambda *a, **kw: (lambda fn: fn),
             PermissionType=types.SimpleNamespace(ADMIN="admin"),
         )

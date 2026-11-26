@@ -261,6 +261,7 @@ class TurnMeter:
         self.estimate_method: str = estimate_method
         self.no_fallback = False
         self.builtin_used = False
+        self.builtin_observed = False
         self.tool_calls: int = 0
         self.request_sent: bool = False
         self.rpc_stage = "idle"
@@ -351,8 +352,9 @@ class TurnMeter:
     def record_tool_call(self) -> None:
         self.tool_calls += 1
 
-    def record_builtin_call(self):
+    def record_builtin_call(self, *, observed=False):
         self.builtin_used = True
+        self.builtin_observed |= observed
         self.record_tool_call()
 
     def observe_usage(self, result: dict, *, source: str) -> None:
@@ -396,7 +398,9 @@ class TurnMeter:
 
         fallback_reason = None
         if status in {"error", "short_circuited"}:
-            if self.builtin_used:
+            if self.builtin_observed:
+                fallback_reason = "builtin_observed"
+            elif self.builtin_used:
                 fallback_reason = "builtin_grant"
             elif self.tool_handed_off:
                 fallback_reason = "tool_handoff"

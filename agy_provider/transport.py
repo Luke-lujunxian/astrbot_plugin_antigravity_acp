@@ -491,8 +491,8 @@ class AcpClient:
                     broker = self.tool_broker
                     broker.read_decisions[ident] = True
                     broker.count += 1
-                    if broker.on_builtin_grant:
-                        broker.on_builtin_grant()
+                    if broker.on_builtin_call:
+                        broker.on_builtin_call()
                 reply["result"] = {
                     "outcome": {"outcome": "selected", "optionId": option_id}
                 }

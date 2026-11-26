@@ -216,7 +216,9 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response["status_code"], expected)
             self.assertEqual(response["headers"]["Cache-Control"], "no-store")
             if expected != 200:
-                self.assertNotIn("data", response)
+                code = "UNAUTHENTICATED" if expected == 401 else "FORBIDDEN"
+                self.assertEqual(response["data"], {"code": code})
+                self.assertTrue(response["message"].startswith(f"[AGY:{code}] "))
         self.manager.acm.default_conf.pop("dashboard")
         self.assertEqual((await self.service.handle())["status_code"], 403)
 
@@ -252,7 +254,18 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         await self.service.close()
         await self.service.close()
         self.assertEqual(self.context.registered_web_apis, [replacement])
-        self.assertEqual((await handler())["status_code"], 503)
+        response = await handler()
+        self.assertEqual(response["status_code"], 503)
+        self.assertEqual(response["data"], {"code": "CLOSED"})
+        self.assertTrue(response["message"].startswith("[AGY:CLOSED] "))
+
+    async def test_unavailable_daily_storage_has_distinct_bridge_code(self):
+        with patch("agy_provider.monitoring.daily_snapshot", side_effect=OSError("path")):
+            response = await self.service.handle("daily/90")
+        self.assertEqual(response["status_code"], 503)
+        self.assertEqual(response["data"], {"code": "STORAGE_UNAVAILABLE"})
+        self.assertTrue(response["message"].startswith("[AGY:STORAGE_UNAVAILABLE] "))
+        self.assertNotIn("path", str(response))
 
     async def test_privacy_regression_safe_recent_turns_and_monitor_status(self):
         inst = self.instance("priv")

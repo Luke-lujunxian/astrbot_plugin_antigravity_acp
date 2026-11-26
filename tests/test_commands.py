@@ -22,7 +22,11 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         path = Path(__file__).resolve().parents[1] / "main.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        plugin = next(node for node in tree.body if isinstance(node, ast.ClassDef))
+        plugin = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and any(isinstance(item, ast.AsyncFunctionDef) and item.name == "setup" for item in node.body)
+        )
         commands = [
             node
             for node in plugin.body

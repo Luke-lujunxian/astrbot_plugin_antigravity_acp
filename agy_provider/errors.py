@@ -18,6 +18,7 @@ class AgyError(RuntimeError):
         stage: str = "",
     ):
         self.code = code
+        self.public_message = message
         self.exit_code = exit_code if type(exit_code) is int else None
         self.retry_after = (
             retry_after if type(retry_after) is int and retry_after >= 0 else None

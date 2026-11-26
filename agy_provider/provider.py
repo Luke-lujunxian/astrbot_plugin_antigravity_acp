@@ -799,7 +799,10 @@ class AgyProvider(Provider):
                 raise
             # Runtime retired the failed native session and recorded its cost.
             # Deliver a local terminal message; a new user turn can proceed.
-            notice = "本轮请求了受限的 CLI 内置工具，无法继续取得结果。你可以继续提问，或使用 AstrBot 已启用的工具。"
+            notice = (
+                getattr(exc, "user_notice", None)
+                or "本轮请求了受限的 CLI 内置工具，无法继续取得结果。"
+            ) + "你可以继续提问，或使用 AstrBot 已启用的工具。"
             done_seen = True
             if streaming:
                 yield LLMResponse(role="assistant", completion_text=notice, is_chunk=True)

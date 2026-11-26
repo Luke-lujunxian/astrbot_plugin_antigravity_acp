@@ -29,6 +29,7 @@ class Settings:
     max_output_bytes: int = 4194304
     enable_tools: bool = False
     builtin_read_file: str = "deny"
+    builtin_search_web: str = "deny"
     enable_images: bool = False
     session_reuse_mode: str = "strict"
     cost_log_enabled: bool = False
@@ -96,6 +97,10 @@ class Settings:
         if read_policy not in ("deny", "allow_once"):
             raise AgyError("CONFIG", "builtin_read_file 应为 deny/allow_once。")
         parsed["builtin_read_file"] = read_policy
+        search_policy = values.get("builtin_search_web", defaults.builtin_search_web)
+        if search_policy not in ("deny", "allow"):
+            raise AgyError("CONFIG", "builtin_search_web 应为 deny/allow。")
+        parsed["builtin_search_web"] = search_policy
         reuse_mode = values.get("session_reuse_mode", defaults.session_reuse_mode)
         if not isinstance(reuse_mode, str) or reuse_mode not in {"strict", "structured"}:
             raise AgyError("CONFIG", "session_reuse_mode 应为 strict/structured。")

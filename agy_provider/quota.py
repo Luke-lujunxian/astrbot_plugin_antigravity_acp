@@ -163,22 +163,26 @@ class QuotaService:
                     self.updated is not None and time.monotonic() - self.updated >= 60)), "error": self.error}
 
     async def refresh(self, *, force=False):
-        data = self.snapshot()
         if self.closed:
             raise AgyError("CLOSED", "插件已停用。")
+        data = self.snapshot()
         generation = self.generation
-        if self.task is not None and not self.task.done():
-            same_environment = generation == self.task_generation
+        if self.task is None or self.task.done():
+            if not force and data["fetched_at"] and not data["stale"]:
+                return data
+            self.task_generation = generation
+            self.task = asyncio.create_task(self._refresh(generation))
+            self.task.add_done_callback(self._finished)
+        same_environment = generation == self.task_generation
+        try:
             result = await asyncio.shield(self.task)
-            if same_environment:
-                return result
-            return await self.refresh(force=force)
-        if not force and data["fetched_at"] and not data["stale"]:
-            return data
-        self.task_generation = generation
-        self.task = asyncio.create_task(self._refresh(generation))
-        self.task.add_done_callback(self._finished)
-        return await asyncio.shield(self.task)
+        except asyncio.CancelledError:
+            if not self.closed or asyncio.current_task().cancelling():
+                raise
+            raise AgyError("CLOSED", "插件已停用。") from None
+        if self.closed:
+            raise AgyError("CLOSED", "插件已停用。")
+        return result if same_environment else await self.refresh(force=force)
 
     def _finished(self, task):
         if self.task is task:

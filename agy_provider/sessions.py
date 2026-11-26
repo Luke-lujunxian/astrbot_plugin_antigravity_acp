@@ -159,7 +159,8 @@ def classify_rebuild(
                 reasons.append("tool_hash_changed")
         broker = getattr(session, "broker", None)
         if broker is not None and max(len(getattr(broker, "seen", ())),
-                                      len(getattr(broker, "read_decisions", ()))) >= 4000:
+                                      len(getattr(broker, "read_decisions", ())),
+                                      len(getattr(broker, "search_seen", ()))) >= 4000:
             reasons.append("tool_ledger_limit")
         if history_relation == "host_trim":
             reasons.append("history_host_trim")
@@ -602,7 +603,8 @@ class Runtime:
                     session.broker.result_bytes = 0
                     session.broker.notifications.clear()
                     session.broker.read_calls.clear()
-                    session.broker.on_builtin_grant = local_meter.record_builtin_call
+                    session.broker.search_calls.clear()
+                    session.broker.on_builtin_call = local_meter.record_builtin_call
                     session.broker.error = None
                 text_parts = []
                 # Reset before a reused client's next turn, including errors
@@ -718,8 +720,9 @@ class Runtime:
                 if generation_started:
                     local_meter.observe_client(session.client)
                     if session.broker:
-                        session.broker.on_builtin_grant = None
+                        session.broker.on_builtin_call = None
                         session.broker.read_calls.clear()
+                        session.broker.search_calls.clear()
                 # Partial/cancelled turns never become a reusable history prefix.
                 short_circuited = (
                     isinstance(failure_exc, AgyError) and failure_exc.no_retry

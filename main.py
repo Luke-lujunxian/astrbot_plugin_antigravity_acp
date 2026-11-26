@@ -38,6 +38,16 @@ from .agy_provider.telemetry import daily_snapshot, format_cost_report, start_di
 RESTORE_IDS = "_sl251_agy_provider_restore_ids"
 
 
+class BareAgyCommand(filter.CustomFilter):
+    def filter(self, event, cfg):
+        return event.is_at_or_wake_command and event.message_str.strip() == "agy"
+
+
+class AgySubcommands(BareAgyCommand):
+    def filter(self, event, cfg):
+        return not super().filter(event, cfg)
+
+
 def unregister_owned_adapter() -> None:
     meta = registry.provider_cls_map.get(PROVIDER_TYPE)
     if meta is None:
@@ -69,9 +79,16 @@ class AgyProviderPlugin(Star):
         self.setup_service = None
         self.monitor_service = None
 
+    # AstrBot checks group custom filters before it generates the bare command tree.
+    @filter.custom_filter(AgySubcommands)
     @filter.command_group("agy")
     async def agy(self, event: AstrMessageEvent):
         pass
+
+    @filter.custom_filter(BareAgyCommand)
+    @admin_command
+    async def agy_root(self, event: AstrMessageEvent):
+        yield event.plain_result(HELP)
 
     @agy.command("setup")
     @admin_command
@@ -190,7 +207,13 @@ class AgyProviderPlugin(Star):
         elif service.login.busy:
             yield event.plain_result("登录中，请稍后查询额度。")
         else:
-            yield event.plain_result(quota_text(await service.quota.refresh()))
+            try:
+                message = quota_text(await service.quota.refresh())
+            except AgyError as exc:
+                if exc.code != "CLOSED":
+                    raise
+                message = str(exc)
+            yield event.plain_result(message)
 
     @agy.command("status")
     @admin_command
