@@ -1,18 +1,22 @@
 import asyncio
 import copy
 import importlib
+import json
+import os
 import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from tests import astrbot_stub  # noqa: F401
+from tests.test_host_replay import Response, runner_type
 from tests.test_tools_mode import _load_provider_module
 from agy_provider.config import Settings
 from agy_provider.errors import AgyError
+from agy_provider.host_compat import install_host_compat, uninstall_host_compat
 from agy_provider.messages import ConversationInput, normalize
 from agy_provider.process import LaunchInfo
 from agy_provider.sessions import Runtime, decide_reuse
@@ -33,6 +37,190 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
                 "type": "object", "properties": {"value": {"type": "string"}}})]))
         self.enterContext(patch("agy_provider.sessions.discover", AsyncMock(return_value=LaunchInfo("fake", "1.5.9", False))))
         self.enterContext(patch("agy_provider.sessions.launch_args", return_value=[sys.executable, str(Path(__file__).with_name("fake_tool_cli.py"))]))
+
+    async def max_steps_runner(self, *, builtins=False):
+        stubs = _load_provider_module(self.root)
+        stubs["astrbot.core.provider.entities"].LLMResponse = Response
+        self.enterContext(patch.dict(sys.modules, stubs))
+        sys.modules.pop("agy_provider.provider", None)
+        self.addCleanup(sys.modules.pop, "agy_provider.provider", None)
+        module = importlib.import_module("agy_provider.provider")
+        module.configure(replace(self.settings, builtin_search_web="allow" if builtins else "deny"))
+        self.addCleanup(module.configure, Settings())
+        provider = module.AgyProvider({"id": "p", "model": "gemini-test"}, {})
+        self.addAsyncCleanup(provider.terminate)
+
+        def launch(info, home, *, use_default_agent, customizations_mode):
+            fixtures = Path(__file__).parent
+            if use_default_agent:
+                return [sys.executable, str(fixtures / "fake_tool_cli.py")]
+            return [sys.executable, str(fixtures / "fake_cli.py"), "echo"]
+
+        log = self.root / "cli.jsonl"
+        self.enterContext(patch.dict(os.environ, {"AGY_TEST_LOG": str(log)}))
+        launches = self.enterContext(patch("agy_provider.sessions.launch_args", side_effect=launch))
+
+        class Runner(runner_type()):
+            MAX_STEPS_REACHED_PROMPT = "Step budget exhausted. Summarize the results."
+
+            async def _iter_llm_responses(self, **kwargs):
+                if self.provider is not provider:
+                    self.provider.calls += 1
+                    yield Response(role="assistant", completion_text="fallback")
+                    return
+                async for response in provider.text_chat_stream(
+                    contexts=self.run_context.messages,
+                    session_id="max-steps",
+                    func_tool=self.req.func_tool,
+                    abort_signal=self._abort_signal,
+                ):
+                    yield response
+
+        install_host_compat(Runner, owner=module.OWNER, logger=Mock())
+        self.addCleanup(uninstall_host_compat, Runner)
+        runner = Runner()
+        toolset = SimpleNamespace(tools=[SimpleNamespace(
+            name="echo", active=True, description="echo",
+            parameters={"type": "object", "properties": {"value": {"type": "string"}}},
+        )])
+        runner.req = SimpleNamespace(func_tool=toolset)
+        runner.provider = provider
+        fallback = SimpleNamespace(calls=0)
+        runner.fallback_providers = [fallback]
+        runner._abort_signal = asyncio.Event()
+        runner._step_budget_max = runner._step_budget_used = 12
+        runner.run_context = SimpleNamespace(messages=[{"role": "user", "content": "echo"}])
+        initial = await self.run_step(runner)
+        call = initial[-1]
+        runner.run_context.messages.extend(self.exchange(
+            call.tools_call_ids[0], call.tools_call_args[0], "completed tool result",
+        ))
+        runner.req.func_tool = None
+        runner._step_budget_used += 1
+        runner.run_context.messages.append({
+            "role": "user", "content": runner.MAX_STEPS_REACHED_PROMPT,
+        })
+        return runner, provider, fallback, launches, log
+
+    @staticmethod
+    async def run_step(runner):
+        return [response async for response in runner._iter_llm_responses_with_fallback()]
+
+    @staticmethod
+    def exchange(call_id, arguments, result):
+        return [
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": call_id, "function": {"name": "echo", "arguments": arguments},
+            }]},
+            {"role": "tool", "tool_call_id": call_id, "content": result},
+        ]
+
+    @staticmethod
+    def prompts(log):
+        events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        return [event for event in events if event["event"] == "prompt"]
+
+    async def test_max_steps_retires_pending_tool_prompt_and_summarizes_without_tools(self):
+        runner, provider, fallback, launches, log = await self.max_steps_runner(builtins=True)
+        old_turn = next(iter(provider.runtime.turns.values()))
+        call = old_turn.waiting["call"]
+        summary = await self.run_step(runner)
+        self.assertEqual(summary[-1].completion_text, "reply:1")
+        self.assertFalse(getattr(summary[-1], "tools_call_ids", None))
+        self.assertEqual(fallback.calls, 0)
+        self.assertFalse(provider.runtime.turns)
+        self.assertTrue(old_turn.finished)
+        self.assertEqual(provider.runtime.tool_outcomes[call.id], "unknown")
+        self.assertEqual([c.kwargs["use_default_agent"] for c in launches.call_args_list], [True, False])
+        self.assertIsNone(next(iter(provider.runtime.sessions.values())).broker)
+        prompts = self.prompts(log)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("completed tool result", "".join(prompts[0]["texts"]))
+
+    async def test_max_steps_late_tool_result_rebuilds_without_fallback_or_tools(self):
+        runner, provider, fallback, launches, log = await self.max_steps_runner()
+        # Exercise the no-retained-turn branch independently of the first fix.
+        await next(iter(provider.runtime.turns.values())).close()
+        first = await self.run_step(runner)
+        self.assertEqual(first[-1].completion_text, "reply:1")
+        runner.run_context.messages.extend(self.exchange("late-result", {}, "late tool result"))
+
+        signal = runner._abort_signal
+        runner._abort_signal = asyncio.Event()
+        foreign = await self.run_step(runner)
+        self.assertIn("[TOOL_STALE]", foreign[-1].completion_text)
+        runner._abort_signal = signal
+
+        summary = await self.run_step(runner)
+        self.assertEqual(summary[-1].completion_text, "reply:1")
+        self.assertFalse(getattr(summary[-1], "tools_call_ids", None))
+        repeated = await self.run_step(runner)
+        self.assertIn("[TOOL_STALE]", repeated[-1].completion_text)
+        self.assertEqual(fallback.calls, 0)
+        self.assertFalse(provider.runtime.turns)
+        self.assertEqual([c.kwargs["use_default_agent"] for c in launches.call_args_list], [True, False, False])
+        self.assertIsNone(next(iter(provider.runtime.sessions.values())).broker)
+        prompts = self.prompts(log)
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("late tool result", "".join(prompts[-1]["texts"]))
+
+    async def test_max_steps_rejects_results_without_a_matching_live_summary(self):
+        runner, provider, fallback, launches, log = await self.max_steps_runner()
+        old = next(iter(provider.runtime.turns.values()))
+        forced_history = list(runner.run_context.messages)
+        runner.run_context.messages.pop()
+        pending = await self.run_step(runner)
+        self.assertIn("[TOOL_STALE]", pending[-1].completion_text)
+        self.assertFalse(old.finished)
+        await old.close()
+        stale = await self.run_step(runner)
+        self.assertIn("[TOOL_STALE]", stale[-1].completion_text)
+
+        runner.run_context.messages = forced_history
+        first = await self.run_step(runner)
+        self.assertEqual(first[-1].completion_text, "reply:1")
+        runner.run_context.messages.extend(self.exchange("late-result", {}, "late tool result"))
+        runner.run_context.messages[0] = {"role": "user", "content": "changed question"}
+        rewritten = await self.run_step(runner)
+        self.assertIn("[TOOL_STALE]", rewritten[-1].completion_text)
+        runner.run_context.messages[0] = {"role": "user", "content": "echo"}
+        await next(iter(provider.runtime.sessions.values())).close()
+        expired = await self.run_step(runner)
+        self.assertIn("[TOOL_STALE]", expired[-1].completion_text)
+        self.assertEqual(fallback.calls, 0)
+        self.assertEqual(launches.call_count, 2)
+        self.assertEqual(len(self.prompts(log)), 1)
+
+    async def test_max_steps_generation_failure_after_tool_results_does_not_replay(self):
+        runner, provider, fallback, launches, log = await self.max_steps_runner()
+        first = await self.run_step(runner)
+        self.assertEqual(first[-1].completion_text, "reply:1")
+        runner.run_context.messages.extend(self.exchange("late-result", {}, "late tool result"))
+        scenario = self.root / "scenario"
+        scenario.write_text("empty", encoding="utf-8")
+        with patch.dict(os.environ, {"AGY_SCENARIO_FILE": str(scenario)}):
+            failed = await self.run_step(runner)
+        self.assertEqual(failed[-1].role, "err")
+        self.assertIn("[EMPTY]", failed[-1].completion_text)
+        self.assertEqual(fallback.calls, 0)
+        self.assertEqual(launches.call_count, 3)
+        self.assertEqual(len(self.prompts(log)), 2)
+        self.assertFalse(provider.runtime.turns)
+
+    async def test_max_steps_failure_after_trimmed_tool_history_does_not_replay(self):
+        runner, provider, fallback, launches, log = await self.max_steps_runner()
+        # The prior handoff still blocks replay when host compaction omits it.
+        del runner.run_context.messages[1:-1]
+        scenario = self.root / "scenario"
+        scenario.write_text("empty", encoding="utf-8")
+        with patch.dict(os.environ, {"AGY_SCENARIO_FILE": str(scenario)}):
+            failed = await self.run_step(runner)
+        self.assertEqual(failed[-1].role, "err")
+        self.assertIn("[EMPTY]", failed[-1].completion_text)
+        self.assertEqual(fallback.calls, 0)
+        self.assertEqual(launches.call_count, 2)
+        self.assertEqual(len(self.prompts(log)), 1)
+        self.assertFalse(provider.runtime.turns)
 
     def turn(self, approver=None, *, request=None, settings=None):
         runtime = Runtime(settings or self.settings, self.root)

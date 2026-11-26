@@ -344,6 +344,7 @@ async def chat_events(
     request_fingerprint=None,
     claimed_half_open=None,
     allow_builtins: bool = False,
+    finalizing: bool = False,
 ):
     """Per-entry lock releases on host handoff; retained job owns original lease."""
     if key in runtime.entry_locks:
@@ -351,9 +352,30 @@ async def chat_events(
     runtime.entry_locks[key] = True
     turn = runtime.turns.get(key)
     try:
-        if turn:
+        result_tail = request.messages[-1]["role"] == "tool"
+        if finalizing:
+            if result_tail and (turn or key not in runtime.sessions):
+                raise AgyError("TOOL_STALE", "没有可重建的无工具收尾会话，拒绝旧工具结果。")
+            if turn:
+                if signal is not turn.signal:
+                    raise AgyError("BUSY", "当前会话存在进行中的工具轮，请稍后再试。")
+                await turn.close()
+            source = runtime.stream(
+                request,
+                key,
+                model,
+                effort,
+                meter=meter,
+                provider_id=provider_id,
+                logical_request_id=logical_request_id,
+                request_fingerprint=request_fingerprint,
+                continuation=result_tail or (meter is not None and meter.tool_result_supplied),
+                claimed_half_open=claimed_half_open,
+                finalization_signal=signal,
+            )
+        elif turn:
             if signal is None or signal is not turn.signal:
-                if request.messages and request.messages[-1].get("role") == "tool":
+                if result_tail:
                     raise AgyError(
                         "TOOL_STALE", "原工具轮已结束或不属于当前调用，拒绝回填旧工具结果。"
                     )
@@ -368,8 +390,9 @@ async def chat_events(
                 if runtime.turns.get(key) is turn:
                     runtime.turns.pop(key, None)
                 raise
+            source = turn.events()
         else:
-            if request.messages[-1]["role"] == "tool":
+            if result_tail:
                 raise AgyError("TOOL_STALE", "进程重载或会话结束后不能回填旧工具结果。")
             if (
                 len(runtime.turns)
@@ -393,7 +416,7 @@ async def chat_events(
                 allow_builtins=allow_builtins,
             )
             runtime.turns[key] = turn
-        source = turn.events()
+            source = turn.events()
         try:
             async for event in source:
                 yield event

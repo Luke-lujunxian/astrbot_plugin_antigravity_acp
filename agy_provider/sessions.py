@@ -234,6 +234,7 @@ class Session:
     busy: bool = False
     used_at: float = field(default_factory=time.monotonic)
     lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
+    finalization_signal: asyncio.Event | None = None
 
     @property
     def expected(self) -> list[str]:
@@ -270,6 +271,7 @@ class Session:
             self.model = ""
             self.effort = ""
             self.tool_hash = ""
+            self.finalization_signal = None
 
 
 class Runtime:
@@ -507,6 +509,7 @@ class Runtime:
         continuation: bool = False,
         claimed_half_open: tuple[str, str] | None = None,
         allow_builtins: bool = False,
+        finalization_signal: asyncio.Event | None = None,
     ) -> AsyncIterator[Event]:
         temporary = key is None
         local_meter = meter
@@ -523,6 +526,24 @@ class Runtime:
             )
 
         async with self.lease(key or uuid.uuid4().hex, temporary) as session:
+            result_tail = request.messages[-1]["role"] == "tool"
+            if finalization_signal is not None and result_tail:
+                # Accept only one closed exchange appended to the completed
+                # no-tool finalization of this live host run, as quoted history.
+                if (
+                    session.finalization_signal is not finalization_signal
+                    or session.client is None
+                    or not session.client.alive
+                    or session.system_hash != request.system_hash
+                    or session.system_structured != request.system_structured
+                    or session.model != model
+                    or session.effort != effort
+                    or not request.messages[-2].get("tool_calls")
+                    or request.hashes[:-2] != session.host_expected[:-1]
+                    or request.messages[-1]["tool_call_id"] in self.tool_outcomes
+                ):
+                    raise AgyError("TOOL_STALE", "无工具收尾已过期或历史不匹配，拒绝旧工具结果。")
+            session.finalization_signal = None
             completed = False
             output_seen = False
             failure_exc: BaseException | None = None
@@ -727,6 +748,8 @@ class Runtime:
                             )
                             sent_hashes = request.hashes
                             session.host_expected = sent_hashes + [assistant_hash]
+                            if not result_tail:
+                                session.finalization_signal = finalization_signal
                             if request.persisted_user is not None:
                                 index, persisted_hash = request.persisted_user
                                 session.host_expected[index] = persisted_hash
@@ -832,7 +855,7 @@ class Runtime:
                     local_meter.observe_output(
                         has_output=output_seen or local_meter.tool_calls > 0
                     )
-                    local_meter.no_fallback = getattr(failure_exc, "no_fallback", False)
+                    local_meter.no_fallback |= getattr(failure_exc, "no_fallback", False)
                     local_meter.finish(
                         status="cancelled" if cancelled else "error",
                         error_code=error_code,

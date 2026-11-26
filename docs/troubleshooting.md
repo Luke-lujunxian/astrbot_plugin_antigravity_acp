@@ -37,6 +37,7 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 | `TOOL_PERMISSION` | 当前活跃 prompt 的拒绝记录、工具名称/ID/状态、终态及限流证据 | 内置能力应拒绝；合法 MCP 按 #12 检查，不全局跳过 permission |
 | `TOOL_ARGUMENTS` / `TOOL_SCHEMA` | 宿主原始 schema、模型 wire schema、最小合成参数、是否尚未进入宿主执行 | 按原始契约判断参数是否合法；schema 适配不能收窄宿主约束，见 #13 |
 | `TOOLS_DISABLED` / `TOOL_CONTEXT` / `TOOL_CHOICE` / `TOOL_HISTORY` | enable_tools、tool_use、实例模式、真实 ToolSet、身份/abort_signal、auto/none 和回填历史 | 不通过开启 CLI 内置 shell 或重复执行工具补救；工具历史/结果不能重复提交 |
+| `TOOL_STALE` | 原 ACP prompt 与宿主运行是否仍有效；是否紧接 `max_steps` 告警 | 过期、跨运行或重复的工具回填应拒绝；见下文 [步数耗尽后的收尾](#步数耗尽后的收尾) |
 | `NETWORK` / `TLS` / `TIMEOUT` | 出错阶段、脱敏网络诊断、DNS/出口/系统时间/证书、代理和时限 | 只检查相应路径；管道 EOF 不直接等于网络错误；不禁用 TLS 或无限加超时 |
 | `PROXY_AUTH` / `PROXY` | 407/代理分类、协议/端口/服务可达性、容器路由 | 先修代理；127.0.0.1 是当前容器，不要求重新登录 Google |
 | `TRANSPORT` / `PROTOCOL` | JSON-RPC 格式、CLI 存活、EOF 与实际退出状态、版本/参数能力 | 通用 `-32000` 不直接等于 AUTH；403 不直接证明封号 |
@@ -108,6 +109,12 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 3. 若仍反复出现 `history_rewrite`，先核对是否发生宿主历史编辑或摘要替换，以及近期注入的块能否由宿主提供临时标记。报告时附插件、AstrBot、AGY CLI 版本和脱敏逐轮字段即可。缺少会话身份的调用会显示 `no_identity`。
 
 复用率统计的是插件是否沿用 ACP 会话，缓存 Token 比例统计的是上游报告的缓存用量。可结合逐轮数据排查。[会话历史机制](architecture.md#会话历史与防重放) · [#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33)
+
+## 步数耗尽后的收尾
+
+AstrBot 4.29.4 耗尽步数时清空工具集并追加收尾提示。插件确认是该 runner 的收尾请求后，会结束同一运行保留的工具 prompt，带上已闭合的宿主历史发起无工具 prompt。宿主 MCP 和已配置的 CLI 内置工具都禁用。
+
+若随后收到一组完整的工具调用与结果，只有同一宿主运行和仍存活的 ACP 会话才能接受，且收尾前缀须完全匹配、工具 ID 未出现在当前工具账本中。该交换最多使用一次，以文本历史重建上下文。工具结果已提交后若生成失败，禁止重试与 fallback。排障时核对 `max_steps` 告警、阶段和错误码即可，避免记录提示词及工具结果。
 
 ## 工具、图片与监控
 
