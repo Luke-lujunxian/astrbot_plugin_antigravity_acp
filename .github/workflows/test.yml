@@ -36,37 +36,37 @@ jobs:
       - name: Setup view interaction regressions
         run: node --test tests/setup.test.mjs
 
-  release_v083:
+  release_v084:
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.3 model management & routing UI'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.4 tool policy, quota, usage & readonly builtins'
     needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Package and publish v0.8.3
+      - name: Package and publish v0.8.4
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          grep -Fx 'version: 0.8.3' metadata.yaml
-          grep -Fx 'PLUGIN_VERSION = "0.8.3"' agy_provider/_version.py
-          asset=astrbot_plugin_antigravity_acp_v0.8.3.zip
+          grep -Fx 'version: 0.8.4' metadata.yaml
+          grep -Fx 'PLUGIN_VERSION = "0.8.4"' agy_provider/_version.py
+          asset=astrbot_plugin_antigravity_acp_v0.8.4.zip
           git archive --format=zip --prefix=astrbot_plugin_antigravity_acp/ -o "$asset" "$GITHUB_SHA"
           unzip -t "$asset"
           for f in index.html app.js style.css; do unzip -Z1 "$asset" | grep -Fx "astrbot_plugin_antigravity_acp/views/setup/$f"; done
           if unzip -Z1 "$asset" | grep -E '/views/setup/assets/|/frontend/|/tests/|/docs/'; then exit 1; fi
-          cat > /tmp/v083-notes.md <<'NOTES'
-          ## v0.8.3 — ACP 模型管理与路由交互重构（#36）
+          cat > /tmp/v084-notes.md <<'NOTES'
+          ## v0.8.4 — 工具权限、CLI 额度、每日用量与 1.5.18 只读内置工具适配（#38 / #41）
 
-          - WebUI 调整为「运行监控（默认首页）/ 模型管理 / 环境与认证」三标签页：保留纯 SVG 三层监控图表与设计风格，新增单行全局默认摘要条与顶部异常恢复/漂移同步横幅。
-          - 模型管理保留「添加模型」弹窗，支持原地「编辑」（`provider-update` 保留原 `provider_id`）、思考「跟随全局（...）」明示、本地目录/思考档位缓存及「一键同步」（`provider-repair`）。
-          - 停用或删除全局默认实例前经 `provider-impact` 预览影响并支持原子迁移默认模型（`migrate_default_to`）；修复重载恢复后 `curr_provider_inst` 指针同步与合并配置模态校验。
+          - 新增 WebUI「工具权限」独立页签（`setup/tool-policy`）、官方 CLI 账号额度查询（`setup/quota-refresh` / `monitor/quota`）与本地每日用量热力图（`monitor/daily/*`），精简权限页说明、汉化额度标签并增加未就绪引导条。
+          - 重构 `/agy help|setup|use|quota|usage|cost|doctor|status|models` 私聊输出为简洁中文可读文本，时间转为宿主机本地格式并修复非管理员权限边界。
+          - 完成官方 CLI `1.5.18`（ACP）实测调研：新增统一内置工具注册表并覆盖 `edit_file` 与 1.5.18 调度/子代理工具拒止；开放 `read_file` 至 Linux CLI `1.5.17`/`1.5.18`（含 `StartLine`/`EndLine`/`ByteOffset` 校验，禁止 `file:///` URI）；解除对宿主 MCP 非空的依赖并修复非搜索内置工具误报联网搜索提示。
 
-          完整改动见 [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)、[Issue #36](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/36) 和 [CHANGELOG](https://github.com/sl251/astrbot_plugin_antigravity_acp/blob/v0.8.3/CHANGELOG.md)。
-          Windows / Ubuntu 离线 CI 通过后发布；支持 AstrBot >=4.29.4,<4.30、Python 3.11+。可回退至 v0.8.2。
+          完整改动见 [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)、[PR #42](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/42)、[Issue #38](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/38)、[Issue #41](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/41) 和 [CHANGELOG](https://github.com/sl251/astrbot_plugin_antigravity_acp/blob/v0.8.4/CHANGELOG.md)。
+          Windows / Ubuntu CI 与 `xiaoyu`（CLI `1.5.18`）实机冒烟通过后发布；支持 AstrBot `>=4.29.4,<4.30`、Python 3.11+。可回退至 `v0.8.3`。
           NOTES
-          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v083-notes.md
-          gh release create v0.8.3 "$asset" --target "$GITHUB_SHA" --title "v0.8.3" --notes-file /tmp/v083-notes.md --latest
+          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v084-notes.md
+          gh release create v0.8.4 "$asset" --target "$GITHUB_SHA" --title "v0.8.4" --notes-file /tmp/v084-notes.md --latest

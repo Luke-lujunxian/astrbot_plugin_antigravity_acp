@@ -1,5 +1,13 @@
 # 变更记录
 
+## 0.8.4（2026-11-26）
+
+- **内置工具独立权限与实验性搜索（#38 / [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)）**：新增独立「工具权限」页签与 `POST setup/tool-policy` 接口，支持单独持久化 `builtin_read_file` 与实验性 `builtin_search_web` 而不覆盖既有提供商配置，展示未生效总闸告警与待重载琥珀色徽标并折叠收纳固定拒绝项；`search_web` 关闭时经模型护栏与事后观察中止，开启后按通知计入与 MCP 共用的 `tool_max_calls` 预算，面板与聊天提示均如实说明事后观测局限。
+- **官方 CLI 账号额度与本地每日用量（#38 / [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/38)）**：新增 `QuotaService` 按需查询官方 CLI 账号额度（不读 OAuth 凭据，60 秒 TTL、并发合并、30 秒超时、跨环境失效与脱敏错误码），「运行监控」新增中文化额度窗口与超 3 项模型列表折叠抽屉；新增 `daily-usage-v1.sqlite3` 按宿主本地日历持久化每日用量并提供 90/30/365 天纯 SVG 热力图与模型/指标筛选。
+- **私聊管理员指令与面板 UX 优化**：重构 `/agy help|setup|use|quota|usage|cost|doctor|status|models` 输出格式为简洁中文可读文本（剔除原始 JSON 与 UTC ISO 时间戳，`/agy quota` 转宿主本地 `MM/DD HH:MM` 与倒计时以避免 QQ 识别日期链接）；未就绪阻塞态增加顶部「前往配置 →」引导条，活跃 0 请求实例收敛为单行紧凑状态；非管理员裸 `/agy` 不再泄漏子指令清单。
+- **CLI `1.5.18` 只读原生工具实测、统一注册表与无 MCP 解耦（#41 / [PR #42](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/42)）**：完成 Linux 官方 `Antigravity ACP Server 1.5.18`（无 MCP `mcpServers: []`）实测，确认 `read_url`/`list_dir`/`find_by_name`/`grep_search` 在 `agy acp 1.5.18` 未暴露（目录与检索均退化为 `run_command` 任意 shell 执行，继续锁定拒绝），详见 [CLI 1.5.18 原生工具调查报告](docs/issue41-builtin-tools-probe.md)；新增 `BuiltinToolSpec` 与 `BUILTIN_SPECS` / `KNOWN_BUILTIN_NAMES` 统一注册表覆盖 `edit_file` 与 1.5.18 全量内部调度/子代理工具拒止；开放 `read_file` 至 Linux CLI `1.5.17`/`1.5.18` 并支持 `StartLine`/`EndLine`/`ByteOffset` 严格整数边界与帧间一致性校验（拒绝 `file:///` URI）；解除原生工具对宿主 MCP 非空的依赖（纯内置模式不启动多余 `mcp_bridge.py` 子进程），并修复非搜索内置工具拒止误报 `SEARCH_ABORTED_NOTICE` 的问题。
+- **验证与实机**：Windows 本地 Python 离线回归 352 项通过（23 项 Linux/POSIX 跳过）、Linux 容器（Python 3.12.13）离线回归 352 项通过（17 项 Windows 跳过）、前端 `node --test tests/setup.test.mjs` 42/42 通过、`compileall` / `check_sensitive.py` / `git diff --check` 与 PR #39 / #42 GitHub Actions（Ubuntu/Windows × Python 3.11/3.12）全部通过；已在生产测试宿主（`xiaoyu`，AstrBot 4.29.4 Docker + CLI `1.5.18`）验证无生成 `probe()`（`verified_read=true`）、无 MCP `read_file` 按行分页真实调用（`calls=grants=1`, `server=None`）、插件热部署加载及 `/agy` 指令格式；Windows、macOS、CLI `>=1.5.19` 与 AstrBot `4.30` 尚未完成实机工具验收。
+
 ## 0.8.3（2026-11-25）
 
 - **WebUI 三标签页与交互重构（#36 / [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）**：保留 AstrBot 4.x 原生风格与完整纯 SVG 三层「运行监控」默认首页，新增单行全局默认摘要条与顶部隐式回退（`#route-alert`）/ 配置漂移（`#drift-alert`）告警横幅；「模型管理」新增「添加模型」弹窗入口与原地「编辑」弹窗（`setup/provider-update` 保留原 `provider_id` 避免旧绑定失效），思考默认档位按当前全局配置明示为 `跟随全局（CLI默认 / 低 / 中 / 高）`；切换下拉模型改用本地 `efforts_by_model` 缓存并暂停自动 `setup/check`，弹窗打开期间禁止后台轮询覆盖表单字段，暂态检测失败保留已有目录缓存。

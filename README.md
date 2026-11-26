@@ -7,11 +7,11 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-blue)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29.4%2C%3C4.30-orange)
-![Status](https://img.shields.io/badge/main-v0.8.3-brightgreen)
+![Status](https://img.shields.io/badge/main-v0.8.4-brightgreen)
 
 通过 Google 官方 `agy` 客户端内置的 ACP（Agent Client Protocol）协议，把 Antigravity 模型安全、稳定地接入 AstrBot，作为日常对话主力。
 
-> 💡 **主分支 v0.8.3（2026-11-25）** 完成模型管理与路由交互重构（[#36](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/36) / [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）：默认首页保持「运行监控」并新增全局默认摘要条与异常恢复横幅；支持原地编辑（保留 `provider_id`）、配置漂移一键同步、受控默认迁移及「跟随全局」思考档位明示。可通过下方主分支 ZIP 或页面重装并重载插件。
+> 💡 **主分支 v0.8.4（2026-11-26）** 完成内置工具权限、官方 CLI 额度与每日用量管理（[#38](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/38) / [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)）以及 CLI `1.5.18` 只读原生工具适配与无宿主 MCP 解耦（[#41](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/41) / [PR #42](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/42)）：新增「工具权限」独立页签、账号额度卡片与每日用量热力图，统一精简 `/agy` 管理员指令输出，并在 Linux CLI `1.5.17`/`1.5.18` 下支持脱离宿主 MCP 的隔离工作区 `.txt` 只读（含按行分页）与实验性搜索。可通过下方主分支 ZIP 或最新 Release 纯净包安装并重载插件。
 
 ---
 
@@ -38,7 +38,7 @@
 做这个插件最大的初衷，就是因为**被 Google 杀号杀怕了**。为了稳稳用上官方模型，本插件坚持**纯合规路线**：
 - **不碰逆向，不写黑科技**：只调用本机官方 `agy` 客户端，走标准 stdio 管道和 ACP 协议通信。
 - **免 API Key，零中转**：本地客户端自带鉴权，不需要搭建任何第三方 HTTP 反代服务，登录即用。
-- **权限安全物理熔断**：`agy` 原生拥有读写本地文件和执行终端命令的 Agent 权限。为了防止机器人在聊天中被提示词注入破坏系统，插件在启动时**强制关闭了自带的所有本地文件与终端工具**，外部工具调用完全交由 AstrBot 自身的权限体系托管。
+- **权限安全默认熔断**：`agy` 原生拥有本地文件与命令执行能力；为防止提示词注入越权破坏系统，插件默认拒绝所有内置工具，仅在开启工具总闸后支持于 Linux CLI `1.5.17` / `1.5.18` 按需单次授权读取隔离会话工作区顶层 `.txt`（或独立开启实验性 `search_web`），文件编辑/写入、终端与浏览器保持锁定拒绝，其余外部工具调用交由 AstrBot 自身权限体系托管。
 
 ### 📌 功能边界一览
 
@@ -116,6 +116,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 *(完整历史见 [`CHANGELOG.md`](./CHANGELOG.md))*
 
+- **v0.8.4**：新增独立「工具权限」页签（`setup/tool-policy`）、官方 CLI 账号额度查询（`setup/quota-refresh` / `monitor/quota`）与本地每日用量热力图（`monitor/daily/*`），精简工具权限说明、汉化额度窗口与折叠长列表并重构 `/agy` 管理员指令可读性（[#38](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/38) · [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)）；完成 CLI `1.5.18` 原生工具协议实测，开放 `read_file` 至 `1.5.18` 与只读分页校验，解除原生工具对宿主 MCP 非空的依赖并修正非搜索拒止文案（[#41](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/41) · [PR #42](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/42)）。
 - **v0.8.3**：重构「运行监控 / 模型管理 / 环境与认证」三标签页、新增原位编辑（`provider-update`）与配置漂移修复（`provider-repair`）、支持受控默认迁移及思考「跟随全局」明示（[#36](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/36) · [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）。
 - **v0.8.2**：修复临时用户文本导致的会话误重建，覆盖普通续聊及工具回填。[#35](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/35)
 - **v0.8.1**：替换为 feat/ui-redesign 原生可视化前端，兼容监控 v2 与复制降级，保留 v0.8.0 后端（实机待 #31）。

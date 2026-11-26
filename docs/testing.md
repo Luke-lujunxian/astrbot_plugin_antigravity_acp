@@ -62,13 +62,15 @@ python -m unittest tests.test_routing tests.test_b06_side_effects tests.test_b07
 
 v0.8.1 恢复原生 DOM 回归，v0.8.3（#36）在此基础上覆盖三标签页切换、路由与配置漂移告警、本地目录缓存、弹窗防覆盖、原地编辑 `provider-update`、批量同步 `provider-repair` 与受控迁移 `provider-impact` 等交互，真实 iframe/多端视觉回归仍需在宿主中单独检查。
 
-### 模型管理与路由交互（#36）
+### 模型管理、路由交互（#36）与工具权限 / 额度 / 只读梯队（#38 / #41）
 
 ```sh
-python -m unittest tests.test_onboarding tests.test_routing tests.test_main_init -v
+python -m unittest tests.test_onboarding tests.test_routing tests.test_main_init tests.test_issue38_permissions tests.test_issue38_quota tests.test_issue38_daily tests.test_issue41_readonly_builtins tests.test_commands -v
 node --check views/setup/app.js
 node --test tests/setup.test.mjs
 ```
+
+> `v0.8.4` 新增对工具权限注册表、Linux `1.5.17`/`1.5.18` `read_file` 分页参数、无宿主 MCP 解耦、非搜索拒止提示、额度快照缓存与本地每日用量统计的回归覆盖（`tests/setup.test.mjs` 扩至 42 项）。
 
 ### 会话复用（#33）
 
