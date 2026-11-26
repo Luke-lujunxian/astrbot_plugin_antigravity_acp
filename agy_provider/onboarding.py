@@ -5,6 +5,7 @@ import hashlib
 import os
 import platform
 import secrets
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from astrbot.api import logger
 
 from .builtin_tools import supports_read, tool_policy
 from .quota import QuotaService
+from .turn_history import HISTORY_ID, valid_history_id
 from .errors import AgyError
 from .web_errors import WEB_HEADERS, web_error
 from .login import LoginFlow
@@ -104,7 +106,7 @@ def _provider_defaults():
 
 
 async def ensure_provider_source(manager):
-    """Persist the source relationship required by AstrBot 4.29's model page.
+    """Persist the source relationship and per-instance history identities.
 
     ProviderManager has no source-creation method. Use its configuration and
     resource lock, as its create/update methods do. Existing model IDs and
@@ -164,28 +166,37 @@ async def ensure_provider_source(manager):
                 "enable": True, "key": [""],
             }
             sources.append(source)
-        source_ids = {
-            row.get("id") for row in sources if isinstance(row, dict) and row.get("id")
+        source_types = {
+            row["id"]: row.get("type") for row in sources if isinstance(row, dict) and row.get("id")
         }
+        provider_ids = Counter(
+            row["id"] for row in providers if isinstance(row, dict) and isinstance(row.get("id"), str)
+        )
         changed = []
         for provider in providers:
-            if (
-                isinstance(provider, dict)
-                and provider.get("type") == PROVIDER_TYPE
-                and provider.get("provider_source_id") not in source_ids
-            ):
-                changed.append((provider, "provider_source_id" in provider,
-                                provider.get("provider_source_id")))
-                provider["provider_source_id"] = source["id"]
+            if not isinstance(provider, dict):
+                continue
+            updates = {}
+            provider_source = provider.get("provider_source_id")
+            if provider.get("type") == PROVIDER_TYPE and provider_source not in source_types:
+                updates["provider_source_id"] = source["id"]
+            provider_id = provider.get("id")
+            if (isinstance(provider_id, str) and provider_id and provider_ids[provider_id] == 1
+                    and provider.get("type", source_types.get(provider_source)) == PROVIDER_TYPE
+                    and not valid_history_id(provider.get(HISTORY_ID))):
+                updates[HISTORY_ID] = secrets.token_hex(16)
+            for key, value in updates.items():
+                changed.append((provider, key, key in provider, provider.get(key)))
+                provider[key] = value
         try:
             # Re-persist on explicit save even after a previous write failed.
             config.save_config()
         except BaseException:
-            for provider, present, previous in changed:
+            for provider, key, present, previous in changed:
                 if present:
-                    provider["provider_source_id"] = previous
+                    provider[key] = previous
                 else:
-                    provider.pop("provider_source_id", None)
+                    provider.pop(key, None)
             if created:
                 sources.remove(source)
             raise
@@ -457,6 +468,7 @@ class Onboarding:
                 index += 1
             config = deepcopy(DEFAULT_CONFIG)
             config.update(id=provider_id, model=model, enable=True)
+            config[HISTORY_ID] = secrets.token_hex(16)
             if source_id:
                 config["provider_source_id"] = source_id
             config["custom_extra_body"]["agy_thought_level"] = effort
@@ -620,13 +632,14 @@ class Onboarding:
                 if action == "tool-policy":
                     return json_response(self.save_policy(data), headers=WEB_HEADERS)
                 if action == "quota-refresh":
-                    if set(data) != {"csrf"}:
-                        raise AgyError("CONFIG", "额度刷新不接受附加参数。")
+                    force = data.get("force", True)
+                    if data.keys() - {"csrf", "force"} or type(force) is not bool:
+                        raise AgyError("CONFIG", "额度刷新参数无效。")
                     if self.quota.closed:
                         raise AgyError("CLOSED", "插件已停用。")
                     if self.login.busy:
                         return web_error("LOGIN_BUSY", "登录中，请稍后刷新。", 409)
-                    return json_response(await self.quota.refresh(force=True), headers=WEB_HEADERS)
+                    return json_response(await self.quota.refresh(force=force), headers=WEB_HEADERS)
                 if action == "provider-repair":
                     self._available()
                     if data.keys() == {"csrf", "all"} and data.get("all") is True:

@@ -57,9 +57,11 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         if previous is not None:
             sys.modules["agy_provider.provider"] = previous
 
-    def instance(self, identity, *, active=True):
+    def instance(self, identity, *, active=True, history_id=None):
         config = {"id": identity, "type": "agy_acp", "enable": True,
                   "model": "gemini-test", "custom_extra_body": {"agy_tools_mode": "chat"}}
+        if history_id:
+            config["agy_history_id"] = history_id
         self.manager.providers_config.append(config)
         if not active:
             return None
@@ -67,6 +69,52 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         self.manager.inst_map[identity] = inst
         self.addAsyncCleanup(inst.terminate)
         return inst
+
+    async def test_detailed_statistics_survive_runtime_and_store_restart(self):
+        from agy_provider.telemetry import daily_snapshot, failure_snapshot, start_diagnostics, stop_diagnostics
+
+        start_diagnostics(Path(self.temp.name))
+        self.addCleanup(stop_diagnostics)
+        old = self.instance("one", history_id="a" * 32)
+        meter = old.runtime.telemetry.start_turn(
+            provider="one", session_key_raw="private", model="gemini-test", mode="chat", effort="low")
+        meter.request_sent = True
+        meter.finish(status="error", error_code="TIMEOUT")
+        await old.terminate()
+        start_diagnostics(Path(self.temp.name))
+        config = self.manager.providers_config[0]
+        new = self.provider.AgyProvider({**config, "model": "gemini-new"}, {})
+        self.addAsyncCleanup(new.terminate)
+        self.manager.inst_map["one"] = new
+        row, = (await self.service.handle())["data"]["instances"]
+        self.assertEqual(row["history_storage"], "available")
+        self.assertEqual(row["summary"]["total_turns"], 1)
+        self.assertEqual(row["recent_turns"][0]["model"], "gemini-test")
+        self.assertTrue(row["recent_turns"][0]["historical"])
+        self.assertIsNone(row["summary"]["total_output"])
+        self.assertIsNone(row["latest_context"]["context_used"])
+        self.assertEqual(row["pool"]["active_sessions"], 0)
+        self.assertEqual(daily_snapshot()["days"][0]["requests"], 1)
+        self.assertEqual(len(failure_snapshot()["failure_events"]), 1)
+        self.assertEqual(new.runtime.telemetry.summarize()["candidate_turns"], 1)
+        self.assertFalse(new.runtime.telemetry.tombstones)
+
+        next_turn = new.runtime.telemetry.start_turn(
+            provider="one", session_key_raw="private", model="gemini-new", mode="chat", effort="low")
+        next_turn.request_sent = True
+        next_turn.reused = True
+        next_turn.finish(status="ok")
+        next_turn.finish(status="ok")
+        row, = (await self.service.handle())["data"]["instances"]
+        self.assertEqual(row["summary"]["reuse_rate"], 0.5)
+        self.assertEqual([t["model"] for t in row["recent_turns"]], ["gemini-new", "gemini-test"])
+        self.assertEqual(daily_snapshot()["days"][0]["requests"], 2)
+        self.assertEqual(len(failure_snapshot()["failure_events"]), 1)
+
+        for changed in ({"agy_history_id": "b" * 32}, {"id": "two"}, {"agy_history_id": None}):
+            other = self.provider.AgyProvider({**config, **changed}, {})
+            self.addAsyncCleanup(other.terminate)
+            self.assertEqual(other.runtime.telemetry.monitor_summary()["total_turns"], 0)
 
     async def test_status_contract_allowlist_and_instance_isolation(self):
         one, two = self.instance("one"), self.instance("two")
@@ -133,6 +181,7 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
                     "pool",
                     "summary",
                     "latest_context",
+                    "history_storage",
                     "recent_turns",
                 },
             )

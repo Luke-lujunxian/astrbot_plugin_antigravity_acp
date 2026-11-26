@@ -16,6 +16,10 @@ from pathlib import Path
 from .errors import AgyError
 from .process import build_child_env, capture, cli_version, resolve_binary, spawn, stop_process
 
+CACHE_TTL_SECONDS = 60
+RETRY_COOLDOWN_SECONDS = 60
+MANUAL_RETRY_ERRORS = {"AUTH", "NOT_INSTALLED", "UNSUPPORTED"}
+
 MESSAGES = {
     "AUTH": "请在环境与认证页完成官方 CLI 登录。",
     "TIMEOUT": "额度查询超时。",
@@ -146,6 +150,7 @@ class QuotaService:
         self.data = {}
         self.updated = None
         self.error = None
+        self.retry_after = 0
 
     def _sync(self):
         key, observable = _environment()
@@ -160,7 +165,8 @@ class QuotaService:
         return {"schema_version": 1, "source": "official_cli", "login_env": env_id,
                 "cli_version": None, "capability": "unknown", "groups": [], "fetched_at": None,
                 **self.data, "stale": bool(self.error or (
-                    self.updated is not None and time.monotonic() - self.updated >= 60)), "error": self.error}
+                    self.updated is not None and time.monotonic() - self.updated >= CACHE_TTL_SECONDS)),
+                "error": self.error}
 
     async def refresh(self, *, force=False):
         if self.closed:
@@ -168,25 +174,35 @@ class QuotaService:
         data = self.snapshot()
         generation = self.generation
         if self.task is None or self.task.done():
-            if not force and data["fetched_at"] and not data["stale"]:
+            if not force and ((data["fetched_at"] and not data["stale"])
+                              or time.monotonic() < self.retry_after):
                 return data
             self.task_generation = generation
             self.task = asyncio.create_task(self._refresh(generation))
             self.task.add_done_callback(self._finished)
         same_environment = generation == self.task_generation
         try:
-            result = await asyncio.shield(self.task)
+            result, result_generation = await asyncio.shield(self.task)
         except asyncio.CancelledError:
             if not self.closed or asyncio.current_task().cancelling():
                 raise
             raise AgyError("CLOSED", "插件已停用。") from None
         if self.closed:
             raise AgyError("CLOSED", "插件已停用。")
-        return result if same_environment else await self.refresh(force=force)
+        if not same_environment:
+            return await self.refresh(force=force)
+        self._sync()
+        if result_generation != self.generation:
+            return self._environment_changed()
+        return result
 
     def _finished(self, task):
         if self.task is task:
             self.task = None
+
+    def _environment_changed(self):
+        return {**self.snapshot(), "stale": True, "groups": [], "fetched_at": None,
+                "error": {"code": "ENV_CHANGED", "message": MESSAGES["ENV_CHANGED"]}}
 
     async def _refresh(self, generation):
         version = code = None
@@ -211,23 +227,26 @@ class QuotaService:
             code = "QUOTA_FAILED"
         observable = self._sync()
         if generation != self.generation:
-            return {**self.snapshot(), "stale": True, "groups": [], "fetched_at": None,
-                    "error": {"code": "ENV_CHANGED", "message": MESSAGES["ENV_CHANGED"]}}
+            return self._environment_changed(), self.generation
         if code == "AUTH":
             self.invalidate()
         self.data["cli_version"] = version
         if code:
             self.error = {"code": code, "message": MESSAGES[code]}
+            if observable:
+                self.retry_after = (float("inf") if code in MANUAL_RETRY_ERRORS
+                                    else time.monotonic() + RETRY_COOLDOWN_SECONDS)
             if code == "UNSUPPORTED":
                 self.data["capability"] = "unsupported"
         else:
             self.error = None
+            self.retry_after = 0
             self.updated = time.monotonic()
             self.data.update(groups=groups, capability="supported", fetched_at=datetime.now(timezone.utc).isoformat())
         result = self.snapshot()
         if not observable:
             self.invalidate()
-        return result
+        return result, self.generation
 
     async def close(self):
         self.closed = True

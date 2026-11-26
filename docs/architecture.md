@@ -40,7 +40,7 @@ flowchart LR
 | [mcp_bridge.py](../agy_provider/mcp_bridge.py)、[bridge_transport.py](../agy_provider/bridge_transport.py) | MCP 子进程 relay、本地通道与 Windows 双向挑战认证 |
 | [errors.py](../agy_provider/errors.py)、[notices.py](../agy_provider/notices.py)、[failure_guard.py](../agy_provider/failure_guard.py) | 错误分类、跨分片 CLI 告警过滤/快速中断、EMPTY 去重与额度/限流冷却 |
 | [host_compat.py](../agy_provider/host_compat.py) | AstrBot runner 防重放兼容层；核验 4.29.4 的 fallback 入口 |
-| [context_usage.py](../agy_provider/context_usage.py)、[telemetry.py](../agy_provider/telemetry.py) | 上下文占用、疑似压缩、计费 usage 与脱敏轮次记录 |
+| [context_usage.py](../agy_provider/context_usage.py)、[telemetry.py](../agy_provider/telemetry.py)、[turn_history.py](../agy_provider/turn_history.py) | 上下文占用、疑似压缩、计费 usage 与脱敏明细存储 |
 | [auth.py](../agy_provider/auth.py)、[login.py](../agy_provider/login.py)、[probe.py](../agy_provider/probe.py) | 文件桥、官方交互登录、无生成 ACP 检测 |
 | [models.py](../agy_provider/models.py)、[onboarding.py](../agy_provider/onboarding.py) | 真实模型目录/选项，设置页检测、保存与宿主持久化 |
 | [monitoring.py](../agy_provider/monitoring.py)、[views/setup/](../views/setup/) | 管理员只读监控 API、无构建步骤的 HTML/CSS/JS 设置页 |
@@ -92,13 +92,23 @@ flowchart LR
 - v0.8.0 的 [routing.py](../agy_provider/routing.py) 区分配置主项、解析主项及服务观测；[failure_events.py](../agy_provider/failure_events.py) 提供有界脱敏持久失败诊断。当前输入与历史封套分离，历史媒体占位不计入当前附件预算。
 
 - `usage_status=reported` 才是取得计费 usage；`not_sent` 表示未发模型 prompt，可记录 0；`unavailable` 表示发出但上游未报告，用 `null/未知`。上下文占用不等于计费输入、缓存率或账号余额。
-- 每实例内存保留最近 24 小时最多 100 轮，重启清空；持久 `agy.turn` 日志默认关闭（`cost_log_enabled=false`）。原始会话身份不暴露，监控对嵌套字段做白名单投影。
+- [监控明细存储](#监控明细存储)保留每实例近 24 小时最多 100 轮的脱敏统计。含更多诊断字段的 `agy.turn` 日志仍由 `cost_log_enabled` 独立控制，默认关闭。
 - 文件桥只校验官方认证源的元数据，链接单个 `agy/antigravity-oauth-token`，不读取/复制内容。源缺失可尝试原生认证后端；不安全的现有文件为 `AUTH_BRIDGE`，不能靠忽略校验修复。
 - [login.py](../agy_provider/login.py) 把单行 code 交给官方 `agy acp --login` stdin；不解析完整 localhost 回调 URL。登录进程退出 0 后仍要通过 ACP/目录复检。URL/ticket 仅返回发起者，不落盘、不写业务日志。
 - [views/setup/app.js](../views/setup/app.js)（原生 HTML/CSS/JS） 使用宿主注入的 `window.AstrBotPluginView`：先 `ready()`，再调用相对 `setup/status` 等 endpoint；不访问父页面 DOM、Dashboard token；本地存储仅用于非敏感主题偏好。首页默认为「运行监控」，与「模型管理」（支持 `setup/apply` 新建、`setup/provider-update` 原地编辑保留 ID、`setup/provider-repair` 修复配置漂移、`setup/provider-impact` 预览影响并原子迁移全局默认后再停用/删除）及「环境与认证」分标签页协同。设置 POST 使用当前 nonce，后台动作须轮询终态；模型已保存但全局默认切换失败应显示部分成功。
 - `GET monitor/status` 只收集现有实例快照，不启动 Runtime/CLI；仅配置中的 Dashboard 管理员可读，匿名 401，API Key/其他身份 403，停用 503，响应 `Cache-Control: no-store`。聊天管理员与 Dashboard 身份不是同一鉴权入口。
 - 原生 DOM/bridge 测试覆盖交互与监控 schema v2；前端直接分发，无需构建，真实 iframe、主题、布局、剪贴板与 HTTP 鉴权需要另验。不要用静态页面预览替代宿主验收。
 - 宿主把视图放进 `sandbox="allow-scripts allow-forms allow-downloads"` 的 iframe，且多数部署是 `http://<ip>`（非安全上下文）：`navigator.clipboard` 常为 `undefined`、`window.open` 可能被拦截。复制必须按「Clipboard API → 手势内同步 `execCommand` → 选中文本」降级，且轮询渲染不得重写未变化的 `input.value`（会折叠用户选区）。以上是宿主约束，不是插件缺陷，改动视图时保持不变式。
+
+### 监控明细存储
+
+[turn_history.py](../agy_provider/turn_history.py) 在插件数据目录创建独立的 `turn-history-v1.sqlite3`（`PRAGMA user_version=1`）。最多保留每实例 100 轮、全库 2,000 轮，数据库文件上限 8 MiB，事务使用 SQLite 临时回滚日志。UTC 采样时间用于过期清理与读取过滤，恢复时按实际年龄换算为当前进程的单调时间。读取排除已过期和未来时间的样本。
+
+每条记录包含匿名实例及样本键、采样时间、模型与模式、状态/错误码、耗时、已知 Token、是否发送、复用及缓存标记、重建原因和少量诊断计数。仅记录是否存在稳定会话身份，用于计算复用候选数。聊天、提示词、图片、工具参数或结果、OAuth、会话标识与上下文状态均不写入明细库。
+
+插件为现有唯一实例和从插件面板新建的实例在宿主配置保存随机 `agy_history_id`，以实例 ID 和该随机标记导出明细库键。现有失败日志的 `provider_tag` 基于可复用实例 ID，继续用于失败诊断关联。保留随机标记的模型编辑延续同一实例，旧轮次保留原模型归属。删除再通过面板创建时分配新标记。同名实例缺少标记时无法匹配旧历史，由插件初始化时补标。插件运行期间从宿主入口新建且尚未补标的实例使用内存统计。
+
+结算时同步提交短事务，重复样本键不会追加明细。恢复直接填充 tracker 的统计窗口，跳过每日用量、失败日志及服务观测的结算路径。ACP 会话、工具账本和活跃上下文随新运行时初始化。文件访问受限、库被锁定或损坏时，记录脱敏警告并降级到内存。重载会重新尝试打开，既有数据库及诊断文件保留。
 
 ## 关键配置
 

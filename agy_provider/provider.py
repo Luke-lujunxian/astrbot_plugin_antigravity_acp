@@ -21,6 +21,7 @@ from .paths import plugin_data_root
 from .sessions import Runtime
 from .system_prompt import filter_host_capabilities
 from .telemetry import TurnMeter, provider_tag, safe_context, safe_label
+from .turn_history import HISTORY_ID, instance_tag
 from .tool_turn import chat_events
 from .tools import ToolSnapshot
 
@@ -209,6 +210,7 @@ def instance_monitor_snapshots(manager) -> list[dict]:
             "runtime_state": "active" if active else "configured",
             "pool": inst.runtime.pool_stats() if active else None,
             "summary": inst.runtime.telemetry.monitor_summary(now=history_now) if active else None,
+            "history_storage": inst.runtime.telemetry.history_storage if active else None,
             "latest_context": latest_context,
             "recent_turns": inst.runtime.telemetry.safe_recent_turns(20, now=history_now) if active else [],
         })
@@ -302,6 +304,9 @@ class AgyProvider(Provider):
         namespace = digest(self.provider_id)[:16]
         root = plugin_data_root(Path(get_astrbot_plugin_data_path())) / namespace
         self.runtime = Runtime(self.settings, root)
+        self.runtime.telemetry.restore_history(
+            instance_tag(provider_config.get("id"), provider_config.get(HISTORY_ID))
+        )
         self.image_fingerprints = ImageFingerprints()
         self.warned_tools = False
         _instances.add(self)

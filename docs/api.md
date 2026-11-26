@@ -1,4 +1,4 @@
-# Issue #38 后端接口
+# WebUI 后端接口
 
 路径均相对 AstrBot 插件视图 bridge。沿用 apiGet/apiPost 的宿主 JSON 封装，下文描述 data。面板管理员认证共用现有规则，匿名 401，API key 和非面板管理员 403，新接口停用 503。原 setup/status 在停用后被直接调用仍沿用宿主 400。响应 no-store。POST 为 application/json，必须带 setup/status 当前 csrf。聊天使用独立的 AstrBot 管理员判定。
 
@@ -44,13 +44,23 @@ GET `setup/status` 包含 `tool_policy`。POST `setup/tool-policy` 请求含 `cs
 
 ## 官方 CLI 额度
 
-GET `monitor/quota` 仅读内存缓存，初始 groups=[]、fetched_at=null、error=null。POST `setup/quota-refresh` 请求仅含 csrf，主动查询并返回额度快照。/agy quota 同服务，60 秒内复用成功，面板手动刷新跳过 TTL，并发合并。无后台轮询。登录进行中返回 409，不启动子进程。超时 30 秒。环境变更或面板登录使缓存失效；无法通过文件元数据观察登录环境的原生钥匙串只返回本次查询结果。跨环境或认证失效清空旧值。
+GET `monitor/quota` 仅读内存缓存，初始 `groups=[]`、`fetched_at=null`、`error=null`。进入监控页、从隐藏或往返缓存恢复、登录结束后，面板先读取缓存，只有缓存缺失或过期才尝试自动查询。
+
+POST `setup/quota-refresh` 接受 `{"csrf":"…","force":false}`。省略 `force` 或传 `true` 表示手动刷新，跳过 TTL 与失败冷却。其他类型和额外字段返回 400。按需刷新和 `/agy quota` 复用 60 秒内的成功快照。已核验登录环境的暂时失败冷却 60 秒，认证失败、CLI 未安装或不支持时等待手动刷新或登录环境变化。并发刷新合并为一次官方 CLI `/usage` 查询，超时 30 秒。登录中返回 409。
+
+额度快照仅保留在内存。登录操作、环境变化和认证失效会清除旧额度。无法观察登录环境的原生钥匙串只返回本次查询结果，既有快照与失败冷却均不跨次复用。面板的重置倒计时仅反映额度池的本地时间差。
 
 ```json
 {"schema_version":1,"source":"official_cli","login_env":"匿名环境标识","cli_version":"1.5.17","capability":"supported","fetched_at":"2026-11-26T05:00:00+00:00","stale":false,"groups":[{"name":"额度组","models_shared":["模型显示名"],"buckets":[{"id":"pool-week","name":"周额度","window":"weekly","remaining_fraction":0.75,"reset_time":null}]}],"error":null}
 ```
 
 同组模型共享 buckets，window 使用 CLI 原值。已知前缀解析不到模型时 models_shared=[]。UTC 重置时间为 null 时显示不适用。无绝对额度或套餐推算。capability 取 unknown/supported/unsupported；cli_version 未知为 null。错误采用同一快照（HTTP 200），error 为 {code,message} 固定脱敏说明。代码 AUTH、TIMEOUT、NOT_INSTALLED、UNSUPPORTED、QUOTA_FORMAT、QUOTA_FAILED、ENV_CHANGED。失败时同环境可保留上次成功数据，stale=true；TTL 已过同样 stale。首次未查询 stale=false。
+
+## 近 24 小时运行统计
+
+GET `monitor/status` 沿用 schema v2。每个运行实例的 `summary` 和 `recent_turns` 包含窗口内的历史和实时样本，`/agy cost` 使用相同统计来源。每个实例最多 100 轮，接口返回最近 20 轮明细。复用率按实际发出的轮次计算。缺失用量保留为 `null`。
+
+`instances[].history_storage` 为 `available` 或 `memory_only`。实例未加载时为 `null`。恢复的样本带 `historical: true`，时间和模型仍为采样时的值。`pool`、`latest_context` 和当前运行状态来自本次加载后的运行时。每日用量与失败诊断继续使用独立存储，额度查询不进入请求统计。 [存储与实例归属](architecture.md#监控明细存储)
 
 ## 每日用量
 

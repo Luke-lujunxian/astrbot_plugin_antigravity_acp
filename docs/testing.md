@@ -80,6 +80,18 @@ python -m unittest tests.test_tools_mode tests.test_tool_pipeline tests.test_ses
 
 重点核对临时文本仍发给模型，宿主按持久化文本回放时复用，真实历史编辑时重建，以及工具续轮后用户消息和工具记录仍能匹配。
 
+### 额度刷新与近 24 小时明细恢复（#43）
+
+```sh
+python -m unittest tests.test_issue38_quota tests.test_issue38_daily tests.test_onboarding tests.test_main_init tests.test_monitoring tests.test_telemetry tests.test_turn_history -v
+node --check views/setup/app.js
+node --test tests/setup.test.mjs
+```
+
+定向检查覆盖注册路由、缓存命中与重试、跨登录环境隔离、页面进入和恢复、迟到响应、请求明细恢复、UTC 保留窗口、数量和大小上限、进程退出、落盘字段和存储故障降级。
+
+实机验收在受支持的 AstrBot 和已登录的官方 CLI 上进行。首次进监控和 60 秒后再进各观察一次按需查询，60 秒内重进与面板保持打开时确认 CLI 调用计数。发送数轮短消息，记录耗时、复用率、Token、每日热力图和会话池。先重载插件，再完整重启 AstrBot，核对明细连续、会话池重新建立、用量与失败诊断无重复。追加一轮请求确认统计只增加一次。
+
 ## 全量离线回归
 
 ```sh
