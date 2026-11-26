@@ -36,38 +36,38 @@ jobs:
       - name: Setup view interaction regressions
         run: node --test tests/setup.test.mjs
 
-  release_v085:
+  release_v086:
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.5 quota auto-refresh & persistent monitoring'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit.message == 'release: v0.8.6 late tool results after timeout & max-step finalization'
     needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Package and publish v0.8.5
+      - name: Package and publish v0.8.6
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          grep -Fx 'version: 0.8.5' metadata.yaml
-          grep -Fx 'PLUGIN_VERSION = "0.8.5"' agy_provider/_version.py
-          asset=astrbot_plugin_antigravity_acp_v0.8.5.zip
+          grep -Fx 'version: 0.8.6' metadata.yaml
+          grep -Fx 'PLUGIN_VERSION = "0.8.6"' agy_provider/_version.py
+          asset=astrbot_plugin_antigravity_acp_v0.8.6.zip
           git archive --format=zip --prefix=astrbot_plugin_antigravity_acp/ -o "$asset" "$GITHUB_SHA"
           unzip -t "$asset"
           for f in index.html app.js style.css; do unzip -Z1 "$asset" | grep -Fx "astrbot_plugin_antigravity_acp/views/setup/$f"; done
           if unzip -Z1 "$asset" | grep -E '/views/setup/assets/|/frontend/|/tests/|/docs/'; then exit 1; fi
-          cat > /tmp/v085-notes.md <<'NOTES'
-          ## v0.8.5 — 额度按需自动刷新与监控明细跨重载恢复（#43 / #44）
-          
-          - 打开或恢复监控页时先读额度缓存，缺失或过期才调用官方 CLI /usage；复用 60 秒 TTL、并发合并与失败冷却，保留手动刷新，不增加常驻额度轮询。
-          - 新增独立 SQLite 明细库，恢复近 24 小时每实例最多 100 轮的脱敏请求、耗时、Token 与会话复用统计；全库最多 2,000 轮，主库上限 8 MiB。存储异常降级为内存统计，不重复累计每日用量或失败日志。
-          - ACP 会话池、当前上下文及进程状态仍反映当前运行时；不保存原始对话、凭据或工具参数。旧版本未落盘的明细不回填。
-          
-          [Issue #43](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/43) · [PR #44](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/44) · [PR CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45840247494)
-          
-          PR #44 的 Ubuntu/Windows × Python 3.11/3.12 CI 全部通过；报告记录 Node 45 项通过及 Linux Docker / AstrBot 4.29.4 / CLI 1.5.18 额度查询、并发复用、运行时重建和独立进程恢复实测。管理员 iframe 交互及带生产历史样本的宿主整进程重启仍待验收。支持 AstrBot >=4.29.4,<4.30、Python 3.11+；可回退 v0.8.4，保留统计文件与宿主配置。
+          cat > /tmp/v086-notes.md <<'NOTES'
+          ## v0.8.6 — 工具执行超时后的迟到结果重建与步数收尾修复（#45 / #46）
+
+          - 宿主工具执行超过 `tool_execution_timeout` 后，晚带回的闭合工具结果不再被当作过期回填抛 `TOOL_STALE`。原 ACP 会话仍存活、同一宿主运行、历史前缀与原工具调用完全匹配且结果未提交过时，结果按文本历史送入一次无工具生成，得到基于已完成工具的回答。
+          - 任一条件不满足时返回 `TOOL_TIMEOUT`（禁止重试与 fallback），不再误报「进程重载」；真正的进程重载或过期回填仍返回 `TOOL_STALE`。
+          - 跑满 `max_steps` 后的收尾请求以文本历史重建、不带工具，不再抛 `TOOL_CONTEXT`；跨运行、改写或重复的回填仍被拒绝。
+
+          [Issue #45](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/45) · [PR #46](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/46) · [PR CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45871142042)
+
+          PR #46 的 Ubuntu/Windows × Python 3.11/3.12 CI 全部通过；另用 AstrBot 4.29.4 的 runner 原文离线跑同一套 372 项通过，并已在一台 Linux Docker / AstrBot 4.29.4 实机部署、webchat 一轮验证。线上触发该问题的长工具场景未在实机复现；当时「插件记录为不允许 fallback、宿主仍切到 fallback」的差异尚未查明。支持 AstrBot >=4.29.4,<4.30、Python 3.11+；可回退 v0.8.5，无新增配置或数据迁移。
           NOTES
-          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v085-notes.md
-          gh release create v0.8.5 "$asset" --target "$GITHUB_SHA" --title "v0.8.5" --notes-file /tmp/v085-notes.md --latest
+          printf '\nCI: %s/%s/actions/runs/%s\n\nSHA-256: %s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$(sha256sum "$asset" | cut -d' ' -f1)" >> /tmp/v086-notes.md
+          gh release create v0.8.6 "$asset" --target "$GITHUB_SHA" --title "v0.8.6" --notes-file /tmp/v086-notes.md --latest
