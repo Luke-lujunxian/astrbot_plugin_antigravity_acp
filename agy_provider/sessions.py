@@ -12,6 +12,7 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+from .builtin_tools import BuiltinDenied, is_known_builtin, supports_read
 from .config import Settings
 from .errors import AgyError, classified_error
 from .failure_guard import FailureGuard
@@ -113,6 +114,7 @@ def classify_rebuild(
     model: object = _UNSET,
     effort: object = _UNSET,
     snapshot: object = _UNSET,
+    allow_builtins: object = _UNSET,
 ) -> list[str]:
     """Collect all matching rebuild reasons in deterministic diagnostic order."""
     incoming = request.hashes[:-1]
@@ -156,8 +158,16 @@ def classify_rebuild(
             )
             if getattr(session, "tool_hash", "") != req_tool_hash:
                 reasons.append("tool_hash_changed")
+        if (
+            allow_builtins is not _UNSET
+            and getattr(session, "allow_builtins", False) != bool(allow_builtins)
+            and "tool_hash_changed" not in reasons
+        ):
+            reasons.append("tool_hash_changed")
         broker = getattr(session, "broker", None)
-        if broker is not None and len(getattr(broker, "seen", ())) >= 4000:
+        if broker is not None and max(len(getattr(broker, "seen", ())),
+                                      len(getattr(broker, "read_decisions", ())),
+                                      len(getattr(broker, "search_seen", ()))) >= 4000:
             reasons.append("tool_ledger_limit")
         if history_relation == "host_trim":
             reasons.append("history_host_trim")
@@ -186,6 +196,7 @@ def decide_reuse(
     *,
     temporary: bool = False,
     tombstone: object = None,
+    allow_builtins: object = _UNSET,
 ) -> ReuseDecision:
     expected = getattr(session, "host_expected", None)
     if expected is None:
@@ -199,6 +210,7 @@ def decide_reuse(
         model=model,
         effort=effort,
         snapshot=snapshot,
+        allow_builtins=allow_builtins,
     )
     reuse = not reasons and history_relation == "exact"
     return ReuseDecision(reuse=reuse, reasons=reasons, history_relation=history_relation)
@@ -209,6 +221,7 @@ class Session:
     client: AcpClient | None = None
     broker: ToolBroker | None = None
     tool_hash: str = ""
+    allow_builtins: bool = False
     home: Path | None = None
     system_hash: str = ""
     system_structured: bool = False
@@ -385,23 +398,53 @@ class Runtime:
                     self.key_locks[key] = (lock, refs - 1)
                 self.callers -= 1
 
-    async def open(self, session: Session, system: str, snapshot=None) -> dict:
+    async def open(
+        self,
+        session: Session,
+        system: str,
+        snapshot=None,
+        *,
+        allow_builtins: bool = False,
+    ) -> dict:
         async with session.lifecycle:
-            return await self._open_unlocked(session, system, snapshot)
+            return await self._open_unlocked(
+                session, system, snapshot, allow_builtins=allow_builtins
+            )
 
     async def _open_unlocked(
-        self, session: Session, system: str, snapshot=None
+        self,
+        session: Session,
+        system: str,
+        snapshot=None,
+        *,
+        allow_builtins: bool = False,
     ) -> dict:
         await session.close_unlocked()
         info = await self.launch_info()
         if self.stopped:
             raise AgyError("CLOSED", "插件已停用。")
+        has_mcp = bool(snapshot and snapshot.tools)
+        read_allowed = bool(
+            allow_builtins
+            and self.settings.enable_tools
+            and self.settings.builtin_read_file == "allow_once"
+            and supports_read(info.version)
+        )
+        search_allowed = bool(
+            allow_builtins
+            and self.settings.enable_tools
+            and self.settings.builtin_search_web == "allow"
+        )
+        tools_mode = has_mcp or read_allowed or search_allowed
         session.home = await asyncio.to_thread(
             make_home,
             self.root,
             system,
-            tools_mode=bool(snapshot and snapshot.tools),
+            tools_mode=tools_mode,
             settings=self.settings,
+            read_allowed=read_allowed,
+            search_allowed=search_allowed,
+            has_mcp=has_mcp,
         )
         session.client = AcpClient(self.settings)
         try:
@@ -409,25 +452,27 @@ class Runtime:
                 launch_args(
                     info,
                     session.home,
-                    use_default_agent=bool(snapshot and snapshot.tools),
+                    use_default_agent=tools_mode,
                     customizations_mode=self.settings.agy_customizations_mode,
                 ),
                 session.home / "workspace",
             )
             servers = []
-            if snapshot and snapshot.tools:
-                session.broker = ToolBroker(snapshot, self.settings)
+            if tools_mode:
+                session.broker = ToolBroker(snapshot or ToolSnapshot(None), self.settings)
+                if read_allowed and session.client.verified_read:
+                    session.broker.read_workspace = session.home / "workspace"
                 session.broker.audit_sink = self.record_tool_outcome
-                servers = [await session.broker.start()]
+                if has_mcp:
+                    servers = [await session.broker.start()]
                 session.client.tool_broker = session.broker
             result = await session.client.new_session(
                 session.home / "workspace", servers
             )
             if session.broker:
                 session.broker.session_id = session.client.session_id
-            session.tool_hash = (
-                snapshot.fingerprint if (snapshot and snapshot.tools) else ""
-            )
+            session.tool_hash = snapshot.fingerprint if has_mcp else ""
+            session.allow_builtins = bool(allow_builtins)
             if self.stopped:
                 raise AgyError("CLOSED", "插件已停用。")
             return result
@@ -461,6 +506,7 @@ class Runtime:
         request_fingerprint: str | None = None,
         continuation: bool = False,
         claimed_half_open: tuple[str, str] | None = None,
+        allow_builtins: bool = False,
     ) -> AsyncIterator[Event]:
         temporary = key is None
         local_meter = meter
@@ -468,7 +514,7 @@ class Runtime:
             local_meter = self.telemetry.start_turn(
                 provider=provider_id,
                 session_key_raw=key,
-                mode="tools" if (snapshot and snapshot.tools) else "chat",
+                mode="tools" if ((snapshot and snapshot.tools) or allow_builtins) else "chat",
                 model=model,
                 effort=effort,
                 system_bytes=request.system_bytes,
@@ -515,6 +561,7 @@ class Runtime:
                     snapshot,
                     temporary=temporary,
                     tombstone=tombstone,
+                    allow_builtins=allow_builtins,
                 )
                 local_meter.set_decision(
                     reused=decision.reuse, reasons=decision.reasons,
@@ -523,6 +570,7 @@ class Runtime:
                 context = request.prompt_context
                 if decision.reuse:
                     turn_index = session.turn_counter + 1
+                    sent_start = len(request.messages) - 1
                     prompt, omitted = prompt_blocks(
                         request.messages[-1:], self.settings.history_bytes
                     )
@@ -532,6 +580,7 @@ class Runtime:
                     prompt, omitted = prompt_blocks(
                         request.messages, self.settings.history_bytes
                     )
+                    sent_start = omitted
                     replay_bytes = sum(
                         len(block.get("text", "").encode())
                         for block in prompt
@@ -546,7 +595,15 @@ class Runtime:
                         if context.structured
                         else request.system
                     )
-                    result = await self.open(session, system_for_home, snapshot)
+                    if allow_builtins:
+                        result = await self.open(
+                            session,
+                            system_for_home,
+                            snapshot,
+                            allow_builtins=True,
+                        )
+                    else:
+                        result = await self.open(session, system_for_home, snapshot)
                     assert session.client
                     await select(session.client, result, model, effort)
                     session.system_hash = request.system_hash
@@ -554,6 +611,11 @@ class Runtime:
                     session.model, session.effort = model, effort
                     session.had_transient = False
 
+                local_meter.mode = "tools" if session.broker is not None else "chat"
+
+                # select() validated this id against the CLI catalog, including on
+                # the retained session's initial negotiation.
+                local_meter.model = model
                 prompt = attach_transient_data(
                     prompt,
                     context,
@@ -590,6 +652,10 @@ class Runtime:
                     session.broker.count = 0
                     session.broker.result_bytes = 0
                     session.broker.notifications.clear()
+                    session.broker.read_calls.clear()
+                    session.broker.read_args.clear()
+                    session.broker.search_calls.clear()
+                    session.broker.on_builtin_call = local_meter.record_builtin_call
                     session.broker.error = None
                 text_parts = []
                 # Reset before a reused client's next turn, including errors
@@ -642,6 +708,8 @@ class Runtime:
                                         "AGY 上游容量不可用，请稍后重试。",
                                     )
                                 if reason == "end_turn" and getattr(session.client, "permission_errors", None):
+                                    if any(is_known_builtin(d.tool_name) for d in session.client.permission_errors):
+                                        raise BuiltinDenied()
                                     raise AgyError(
                                         "TOOL_PERMISSION",
                                         "AGY 工具权限请求被安全策略拒绝，随后 CLI 结束了本轮且未返回正文。"
@@ -657,20 +725,23 @@ class Runtime:
                             assistant_hash = digest(
                                 {"role": "assistant", "content": answer}
                             )
-                            session.host_expected = request.hashes + [assistant_hash]
+                            sent_hashes = request.hashes
+                            session.host_expected = sent_hashes + [assistant_hash]
+                            if request.persisted_user is not None:
+                                index, persisted_hash = request.persisted_user
+                                session.host_expected[index] = persisted_hash
+                            # Include tool exchanges appended while the prompt was in flight.
+                            window_tail = sent_hashes[sent_start:] + [assistant_hash]
                             if decision.reuse and session.sent_window is not None:
-                                session.sent_window.hashes.extend(
-                                    [request.hashes[-1], assistant_hash]
-                                )
+                                session.sent_window.hashes.extend(window_tail)
                                 session.sent_window.window_hash = digest(
                                     session.sent_window.hashes
                                 )
                             else:
-                                sent_hashes = request.hashes[omitted:] + [assistant_hash]
                                 session.sent_window = SentWindow(
-                                    hashes=sent_hashes,
+                                    hashes=window_tail,
                                     omitted_messages=omitted,
-                                    window_hash=digest(sent_hashes),
+                                    window_hash=digest(window_tail),
                                 )
                             session.turn_counter = turn_index
                             session.had_transient = bool(
@@ -699,6 +770,11 @@ class Runtime:
             finally:
                 if generation_started:
                     local_meter.observe_client(session.client)
+                    if session.broker:
+                        session.broker.on_builtin_call = None
+                        session.broker.read_calls.clear()
+                        session.broker.read_args.clear()
+                        session.broker.search_calls.clear()
                 # Partial/cancelled turns never become a reusable history prefix.
                 short_circuited = (
                     isinstance(failure_exc, AgyError) and failure_exc.no_retry
@@ -756,6 +832,7 @@ class Runtime:
                     local_meter.observe_output(
                         has_output=output_seen or local_meter.tool_calls > 0
                     )
+                    local_meter.no_fallback = getattr(failure_exc, "no_fallback", False)
                     local_meter.finish(
                         status="cancelled" if cancelled else "error",
                         error_code=error_code,

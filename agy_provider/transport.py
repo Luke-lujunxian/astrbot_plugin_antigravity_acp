@@ -9,6 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._version import PLUGIN_VERSION
+from .builtin_tools import (
+    BuiltinDenied,
+    builtin_notice,
+    is_known_builtin,
+    read_args_digest,
+    read_target,
+    supports_read,
+)
 from .config import Settings
 from .context_usage import ContextUsage
 from .errors import AgyError, classified_error, remote_error
@@ -46,12 +54,21 @@ class _AgentTextGuard:
         self.line_start = True
         self.notices = TerminalNoticeGuard()
         self.retries = RetryNoticeGuard()
+        self.terminal_notice_count = 0
+
+    @property
+    def filtered_count(self):
+        return self.retries.filtered_count + self.terminal_notice_count
 
     def feed(self, text: str, *, final=False) -> str:
         text = self.retries.feed(text, final=final)
         if self.retries.fast_fail_code:
             raise classified_error(self.retries.fast_fail_code)
-        text = self.pending + self.notices.feed(text, final=final)
+        try:
+            text = self.pending + self.notices.feed(text, final=final)
+        except AgyError:
+            self.terminal_notice_count += 1
+            raise
         self.pending = ""
         output = []
         while text:
@@ -59,6 +76,7 @@ class _AgentTextGuard:
             if self.line_start:
                 candidate = line.strip()
                 if candidate in self.markers and (newline or final):
+                    self.terminal_notice_count += 1
                     code = self.retries.error_code or "UPSTREAM"
                     raise AgyError(code, "AGY agent 执行失败，请检查官方 CLI。")
                 possible = any(
@@ -71,7 +89,16 @@ class _AgentTextGuard:
             output.append(line + newline)
             self.line_start = bool(newline)
             text = rest
+        if final:
+            self.line_start = True
         return "".join(output)
+
+    def end_segment(self, *, before_tool=False):
+        """Flush pending text before handoff or completion."""
+        tail = self.feed("", final=True)
+        if before_tool:
+            self.retries.begin_segment()
+        return tail
 
 
 class AcpClient:
@@ -92,8 +119,12 @@ class AcpClient:
         self.output_bytes = 0
         self.closed = False
         self.initialized = False
+        self.verified_read = False
         self.close_lock = asyncio.Lock()
         self.tool_broker = None
+        self.permission_denial_count = 0
+        self.terminal_reason = None
+        self.confirmed_model = None
         self.permission_errors: list[PermissionDenial] = []
         self.permission_grants: set[str] = set()
         self.prompt_deadline = 0
@@ -140,6 +171,9 @@ class AcpClient:
             )
             if result.get("protocolVersion") != 1:
                 raise AgyError("PROTOCOL", "AGY 未协商 ACP v1。")
+            agent = result.get("agentInfo")
+            self.verified_read = (isinstance(agent, dict) and agent.get("name") == "Antigravity ACP Server"
+                                  and supports_read(agent.get("version")))
             self.initialized = True
             self.capabilities = result.get("agentCapabilities") or {}
         except BaseException:
@@ -386,12 +420,11 @@ class AcpClient:
             # have a strict 16 KiB maximum and are never attached to an exception.
             window = window.rsplit(b"\n", 1)[-1] if b"\n" in window else window
 
-    def _mcp_permission_option(self, params: object) -> tuple[str, str] | None:
-        """Permit only an observed session MCP call to reach the host-owned bridge.
+    def _permission_option(self, params: object) -> tuple[str, str] | None:
+        """Bind a one-time grant to a live observation before returning its option.
 
         This is not host approval or execution. The later tools/call still passes
-        the broker's session/schema/budget checks and AstrBot's executor. Native
-        CLI tools, persistent grants and unbound requests remain fail-closed.
+        the broker's session/schema/budget checks and AstrBot's executor. A scoped read additionally reserves its budget before the reply.
         """
         broker = self.tool_broker
         if (
@@ -413,16 +446,25 @@ class AcpClient:
         ident = call.get("toolCallId")
         if not isinstance(ident, str) or not ident or ident in self.permission_grants:
             return None
-        name = broker.snapshot.notification_name(call.get("name"))
-        observed = broker.notifications.get(ident)
-        if (
-            name is None
-            or observed is None
-            or observed[0] != name
-            or observed[1] not in ("pending", "in_progress")
-            or call.get("status") not in ("pending", "in_progress")
-        ):
+        if call.get("status") not in ("pending", "in_progress"):
             return None
+        if call.get("name") == "read_file":
+            observed = broker.read_calls.get(ident)
+            args_key = read_args_digest(call.get("rawInput"))
+            if (not self.verified_read or not observed or observed[1] != "pending"
+                    or call.get("status") != "pending"
+                    or not broker.settings.enable_tools or broker.settings.builtin_read_file != "allow_once"
+                    or read_target(call, broker.read_workspace) != observed[0]
+                    or (ident in broker.read_args and args_key != broker.read_args[ident])
+                    or ident in broker.read_decisions or broker.read_ledger_full
+                    or broker.count >= broker.settings.tool_max_calls):
+                return None
+        else:
+            name = broker.snapshot.notification_name(call.get("name"))
+            observed = broker.notifications.get(ident)
+            if (name is None or not observed or observed[0] != name
+                    or observed[1] not in ("pending", "in_progress")):
+                return None
         options = params.get("options")
         if not isinstance(options, list):
             return None
@@ -450,10 +492,16 @@ class AcpClient:
         # Deny by default; an allow-once MCP transit grant never executes a tool.
         reply = {"jsonrpc": "2.0", "id": obj["id"]}
         if obj["method"] == "session/request_permission":
-            grant = self._mcp_permission_option(obj.get("params"))
+            grant = self._permission_option(obj.get("params"))
             if grant is not None:
                 ident, option_id = grant
                 self.permission_grants.add(ident)
+                if obj["params"]["toolCall"].get("name") == "read_file":
+                    broker = self.tool_broker
+                    broker.read_decisions[ident] = True
+                    broker.count += 1
+                    if broker.on_builtin_call:
+                        broker.on_builtin_call()
                 reply["result"] = {
                     "outcome": {"outcome": "selected", "optionId": option_id}
                 }
@@ -465,16 +513,21 @@ class AcpClient:
                     self._current_update(params)
                     and not self.prompt_terminal
                     and asyncio.get_running_loop().time() < self.prompt_deadline
-                    and len(self.permission_errors) < 128
                 ):
+                    self.permission_denial_count += 1
                     call = params.get("toolCall")
                     call = call if isinstance(call, dict) else {}
                     name, ident = call.get("name"), call.get("toolCallId")
-                    self.permission_errors.append(PermissionDenial(
-                        method="session/request_permission",
-                        tool_name=name[:256] if isinstance(name, str) else None,
-                        tool_call_id=ident[:256] if isinstance(ident, str) else None,
-                    ))
+                    broker = self.tool_broker
+                    if (broker and isinstance(ident, str) and ident in broker.read_calls
+                            and not broker.read_ledger_full):
+                        broker.read_decisions.setdefault(ident, False)
+                    if len(self.permission_errors) < 128:
+                        self.permission_errors.append(PermissionDenial(
+                            method="session/request_permission",
+                            tool_name=name[:256] if isinstance(name, str) else None,
+                            tool_call_id=ident[:256] if isinstance(ident, str) else None,
+                        ))
         else:
             reply["error"] = {
                 "code": -32601,
@@ -536,7 +589,7 @@ class AcpClient:
         if kind in {"tool_call", "tool_call_update"}:
             # Flush a possible terminal notice before any tool can be handed
             # to the host. Never retry or replay a tool as part of this guard.
-            tail = self.text_guard.feed("", final=True)
+            tail = self.text_guard.end_segment(before_tool=True)
             if tail:
                 try:
                     self.events.put_nowait(Event("text", tail))
@@ -545,6 +598,10 @@ class AcpClient:
             if self.tool_broker is not None:
                 self.tool_broker.observe(update)
                 return
+            raw_name = update.get("name")
+            if is_known_builtin(raw_name):
+                notice = builtin_notice(raw_name)
+                raise BuiltinDenied("TOOLS_DISABLED", notice, user_notice=notice)
             raise AgyError(
                 "TOOLS_DISABLED",
                 "AGY 尝试调用内置工具；已中止该轮，请检查 CLI 对无工具 agent 的支持。",
@@ -579,6 +636,8 @@ class AcpClient:
         self.text_guard = _AgentTextGuard()
         self.permission_grants.clear()
         self.permission_errors.clear()
+        self.permission_denial_count = 0
+        self.terminal_reason = None
         self.active = True
         if self.tool_broker is not None:
             self.tool_broker.turn_active = True
@@ -637,6 +696,8 @@ class AcpClient:
                     continue
                 if response.done():
                     result = await response
+                    reason = result.get("stopReason")
+                    self.terminal_reason = reason if isinstance(reason, str) else None
                     if self._record_usage(result, "acp_terminal"):
                         yield Event(
                             "usage",
@@ -657,7 +718,7 @@ class AcpClient:
                         raise self._diagnose(
                             AgyError(code, "AGY agent 执行失败，请检查官方 CLI。")
                         )
-                    remaining = self.text_guard.feed("", final=True)
+                    remaining = self.text_guard.end_segment()
                     if remaining:
                         yield Event("text", remaining)
                     if self.text_guard.retries.error_code:

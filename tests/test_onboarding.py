@@ -24,7 +24,17 @@ class FakeDefaultConfig(dict):
     """Model AstrBotConfig's dict interface and save_config() persistence."""
 
     def __init__(self, manager):
-        super().__init__(provider=[], provider_sources=[])
+        super().__init__(
+            provider=[],
+            provider_sources=[],
+            dashboard={"username": "admin"},
+            agent_runner={
+                "runner_type": "local",
+                "config": {
+                    "model": {"provider_id": "original", "fallback_provider_ids": []}
+                },
+            },
+        )
         self._manager = manager
 
     def save_config(self):
@@ -32,21 +42,33 @@ class FakeDefaultConfig(dict):
 
 
 class FakeManager:
-    """Model 4.29.4's resource_lock, acm.default_conf, load-before-save create and save-before-reload update."""
+    """Model 4.29.4's resource_lock, acm, provider_insts, resolver, and save/reload."""
 
     def __init__(self):
         self.reload_lock = asyncio.Lock()
         self.resource_lock = asyncio.Lock()
         default_conf = FakeDefaultConfig(self)
-        self.acm = types.SimpleNamespace(default_conf=default_conf)
+        self.acm = types.SimpleNamespace(
+            default_conf=default_conf,
+            confs={"default": default_conf},
+            get_conf=lambda umo=None: default_conf,
+        )
         self.providers_config = default_conf["provider"]
         self.provider_sources_config = default_conf["provider_sources"]
         self.persisted = []
         self.persisted_sources = []
+        self.persisted_runner = deepcopy(default_conf["agent_runner"])
         self.inst_map = {}
+        self.provider_insts = []
+        self.curr_provider_inst = None
         self.default = "original"
         self.fail = ""
         self.creates = 0
+        self._provider_change_hooks = []
+
+    def register_provider_change_hook(self, hook):
+        if hook not in self._provider_change_hooks:
+            self._provider_change_hooks.append(hook)
 
     def get_merged_provider_config(self, config):
         merged = deepcopy(config)
@@ -71,12 +93,24 @@ class FakeManager:
         default_conf = self.acm.default_conf
         self.persisted = deepcopy(default_conf["provider"])
         self.persisted_sources = deepcopy(default_conf.get("provider_sources", []))
+        self.persisted_runner = deepcopy(default_conf.get("agent_runner", {}))
+
+    async def terminate_provider(self, provider_id):
+        inst = self.inst_map.pop(provider_id, None)
+        if inst in self.provider_insts:
+            self.provider_insts.remove(inst)
+        if self.curr_provider_inst is inst:
+            self.curr_provider_inst = None
 
     async def load_provider(self, config):
         merged = self.get_merged_provider_config(config)
         if not merged.get("enable"):
             return
-        self.inst_map[config["id"]] = object()
+        inst = types.SimpleNamespace(provider_config=deepcopy(merged))
+        self.inst_map[config["id"]] = inst
+        self.provider_insts.append(inst)
+        if not self.curr_provider_inst:
+            self.curr_provider_inst = inst
 
     async def create_provider(self, config):
         async with self.resource_lock:
@@ -121,11 +155,10 @@ class FakeManager:
         async with self.reload_lock:
             if self.fail == "reload":
                 raise ValueError("private details")
+            await self.terminate_provider(config["id"])
             merged = self.get_merged_provider_config(config)
             if merged.get("enable"):
-                self.inst_map[config["id"]] = object()
-            else:
-                self.inst_map.pop(config["id"], None)
+                await self.load_provider(config)
             self.providers_config = self.acm.default_conf["provider"]
             self.provider_sources_config = self.acm.default_conf.get("provider_sources", [])
 
@@ -134,7 +167,23 @@ class FakeManager:
             raise ValueError(f"Provider {provider_id} does not exist and cannot be set.")
         if self.fail == "default":
             raise OSError("private details")
+        self.curr_provider_inst = self.inst_map[provider_id]
         self.default = provider_id
+
+    def _resolve_using_provider(self, provider_type, umo, provider_id):
+        provider = self.inst_map.get(provider_id) if provider_id else None
+        if not provider:
+            config = self.acm.get_conf(umo)
+            agent_runner = config.get("agent_runner", {})
+            pid = (
+                agent_runner.get("config", {}).get("model", {}).get("provider_id")
+                if agent_runner.get("runner_type") == "local"
+                else None
+            )
+            provider = self.inst_map.get(pid)
+            if not provider:
+                provider = self.provider_insts[0] if self.provider_insts else None
+        return provider
 
 
 class OnboardingTests(unittest.IsolatedAsyncioTestCase):
@@ -212,16 +261,34 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         await self.service.job
 
     async def test_unauthorized_read_and_write(self):
-        self.request.username = ""
-        for action in (
+        actions = (
             "status",
             "check",
             "login",
             "apply",
             "login-code",
             "login-cancel",
-        ):
-            self.assertEqual((await self.call(action))["status_code"], 401)
+            "provider-impact",
+            "provider-default",
+            "provider-toggle",
+            "provider-delete",
+            "provider-update",
+            "provider-repair",
+            "tool-policy", "quota-refresh",
+        )
+        self.request.username = ""
+        for action in actions:
+            self.assert_web_error(await self.call(action), 401, "UNAUTHENTICATED")
+        for non_admin in ("ordinary-user", "api_key:123"):
+            self.request.username = non_admin
+            for action in actions:
+                self.assert_web_error(await self.call(action), 403, "FORBIDDEN")
+
+    def assert_web_error(self, response, status, code):
+        self.assertEqual(response["status_code"], status)
+        self.assertEqual(response["data"], {"code": code})
+        self.assertTrue(response["message"].startswith(f"[AGY:{code}] "))
+        self.assertEqual(response["headers"]["Cache-Control"], "no-store")
 
     async def test_invalid_nonce_and_payload_types(self):
         for payload in (
@@ -232,9 +299,7 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             {"csrf": "中文"},
             {"csrf": 123},
         ):
-            self.assertEqual(
-                (await self.call("check", payload, raw=b"{}"))["status_code"], 403
-            )
+            self.assert_web_error(await self.call("check", payload, raw=b"{}"), 403, "CSRF_EXPIRED")
 
     async def test_content_type_and_body_limit(self):
         self.request.content_type = "text/plain"
@@ -269,7 +334,11 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         own = list(self.context.registered_web_apis)
         other = (own[0][0], AsyncMock(), ["GET"], "another instance")
         self.context.registered_web_apis.append(other)
-        self.assertEqual(len(own), 6)
+        self.assertEqual(len(own), 14)
+        self.assertEqual({row[0].rsplit("/", 1)[-1] for row in own}, {
+            "status", "check", "login", "login-cancel", "login-code", "apply", "provider-impact",
+            "provider-default", "provider-delete", "provider-toggle", "provider-update",
+            "provider-repair", "quota-refresh", "tool-policy"})
         await self.service.close()
         self.assertEqual(self.context.registered_web_apis, [other])
         self.assertEqual((await self.call("status"))["status_code"], 400)
@@ -282,6 +351,111 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             replacement = Onboarding(self.context, Settings())
         self.assertNotEqual(self.service.csrf, replacement.csrf)
         await replacement.close()
+
+    async def test_tool_policy_saved_separately_and_failure_rolls_back(self):
+        from tests.test_main_init import FakePluginConfig
+        self.service.config = FakePluginConfig({})
+        data = {"csrf": self.service.csrf, "read_file": "allow_once"}
+        self.assertEqual((await self.call("tool-policy", data))["status_code"], 400)
+        self.service.report.update(cli_version="1.5.17", verified_read=True)
+        with patch("agy_provider.onboarding.supports_read", return_value=True):
+            result = (await self.call("tool-policy", data))["data"]
+        self.assertTrue(result["reload_required"])
+        self.assertEqual(self.service.config, {"builtin_read_file": "allow_once"})
+        self.assertEqual(self.service.settings.builtin_read_file, "deny")
+        self.service.config.save_error = OSError("private")
+        data["read_file"] = "deny"
+        response = await self.call("tool-policy", data)
+        self.assertEqual(response["status_code"], 500)
+        self.assertNotIn("private", str(response))
+        self.assertEqual(self.service.config["builtin_read_file"], "allow_once")
+
+    async def test_search_policy_is_experimental_and_reload_applies_it(self):
+        from tests.test_main_init import FakePluginConfig
+
+        def search(policy):
+            return next(tool for tool in policy["tools"] if tool["id"] == "search_web")
+
+        self.service.config = FakePluginConfig({})
+        self.service.settings = Settings.from_dict({"enable_tools": True})
+        initial = (await self.call("status"))["data"]["tool_policy"]
+        self.assertFalse(initial["reload_required"])
+        row = search(initial)
+        self.assertEqual((row["policy"], row["effective"]), ("deny", False))
+        self.assertEqual(row["capability"], "experimental")
+        self.assertEqual(row["choices"], ["deny", "allow"])
+        self.assertIs(row["pre_execution_approval"], False)
+        self.assertEqual(row["enforcement"], "post_observation")
+        self.assertIn("可能已发出", row["limitation"])
+
+        data = {"csrf": self.service.csrf, "search_web": "allow"}
+        for invalid in ({"read_file": "allow_once"}, {"browser": "deny"}, {"search_web": "allow_once"}):
+            self.assert_web_error(await self.call("tool-policy", {**data, **invalid}), 400,
+                                  "UNSUPPORTED" if "read_file" in invalid else "CONFIG")
+        self.assertEqual(self.service.config.save_calls, 0)
+
+        result = (await self.call("tool-policy", data))["data"]
+        self.assertEqual(self.service.config, {"builtin_search_web": "allow"})
+        self.assertTrue(result["reload_required"])
+        self.assertTrue(search(result)["reload_required"])
+        self.assertEqual((search(result)["policy"], search(result)["effective"]), ("allow", False))
+        self.service.settings = Settings.from_dict({**self.service.config, "enable_tools": True})
+        self.assertFalse(self.service.policy()["reload_required"])
+        self.assertFalse(search(self.service.policy())["reload_required"])
+        self.assertTrue(search(self.service.policy())["effective"])
+
+        self.service.config.save_error = OSError("private")
+        self.assert_web_error(await self.call("tool-policy", {**data, "read_file": "deny", "search_web": "deny"}),
+                              500, "INTERNAL")
+        self.assertEqual(self.service.config, {"builtin_search_web": "allow"})
+        self.service.config.save_error = None
+        result = (await self.call("tool-policy", {**data, "read_file": "deny", "search_web": "deny"}))["data"]
+        self.assertTrue(result["reload_required"])
+        self.assertEqual((search(result)["policy"], search(result)["effective"]), ("deny", True))
+
+    async def test_quota_refresh_requires_nonce_and_only_explicit_action_queries(self):
+        self.service.quota.refresh = AsyncMock(return_value={"groups": []})
+        self.assertEqual((await self.call("quota-refresh", {"csrf": "expired"}))["status_code"], 403)
+        self.assertEqual((await self.call("quota-refresh", {"csrf": self.service.csrf, "model": "x"}))["status_code"], 400)
+        self.manager.acm.default_conf["plugin_set"] = ["other"]
+        status = (await self.call("status"))["data"]
+        self.assertIn("可用插件", status["command_scope_warning"])
+        self.service.quota.refresh.assert_not_awaited()
+        self.assertEqual((await self.call("quota-refresh"))["data"], {"groups": []})
+        self.service.quota.refresh.assert_awaited_once_with(force=True)
+
+    async def test_registered_on_demand_quota_route_requires_strict_booleans(self):
+        self.service.register()
+        route, handler, methods, _ = next(
+            row for row in self.context.registered_web_apis if row[0].endswith("/setup/quota-refresh")
+        )
+        self.assertTrue(route.startswith("/astrbot_plugin_antigravity_acp/"))
+        self.assertEqual(methods, ["POST"])
+        self.service.quota.refresh = AsyncMock(return_value={"groups": []})
+        self.request.body = AsyncMock(return_value=b"{}")
+        self.request.json = AsyncMock()
+        csrf = self.service.csrf
+        for force in (None, 0, 1, "false", [], {}):
+            self.request.json.return_value = {"csrf": csrf, "force": force}
+            self.assert_web_error(await handler(), 400, "CONFIG")
+        self.request.json.return_value = {"csrf": "expired", "force": False}
+        self.assert_web_error(await handler(), 403, "CSRF_EXPIRED")
+        self.request.json.return_value = {"csrf": csrf, "force": False}
+        with patch.object(type(self.service.login), "busy", True):
+            self.assert_web_error(await handler(), 409, "LOGIN_BUSY")
+        self.service.quota.refresh.assert_not_awaited()
+        self.assertEqual((await handler())["data"], {"groups": []})
+        self.service.quota.refresh.assert_awaited_once_with(force=False)
+
+    async def test_quota_refresh_distinguishes_login_busy_and_close_race(self):
+        self.service.quota.refresh = AsyncMock(side_effect=AgyError("CLOSED", "插件已停用。"))
+        with patch.object(type(self.service.login), "busy", True):
+            self.assert_web_error(await self.call("quota-refresh"), 409, "LOGIN_BUSY")
+        self.service.quota.refresh.assert_not_awaited()
+        self.assert_web_error(await self.call("quota-refresh"), 503, "CLOSED")
+        await self.service.close()
+        self.assert_web_error(await self.call("quota-refresh"), 503, "CLOSED")
+        self.assert_web_error(await self.call("status"), 400, "CLOSED")
 
     async def test_mutual_exclusion_and_duplicate_click(self):
         gate = asyncio.Event()
@@ -375,10 +549,20 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.manager.fail = "default"
         await self.apply(use_default=True)
         self.assertEqual(self.service.action_error, "HOST")
+        self.assertEqual(self.service.result["provider_state"], "created")
         self.assertFalse(self.service.result["default_selected"])
+        self.assertEqual(
+            self.manager.persisted_runner["config"]["model"]["provider_id"],
+            "original",
+        )
         self.manager.fail = ""
         await self.apply(use_default=True)
         self.assertTrue(self.service.result["default_selected"])
+        self.assertEqual(self.service.result["provider_state"], "existing")
+        self.assertEqual(
+            self.manager.persisted_runner["config"]["model"]["provider_id"],
+            self.service.result["provider_id"],
+        )
         self.assertEqual(self.manager.creates, 1)
 
     async def test_shutdown_waits_for_host_commit(self):
@@ -430,12 +614,25 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.creates, 1)
 
     async def test_ensure_provider_source_idempotent(self):
+        self.manager.providers_config.append({"id": "legacy", "type": "agy_acp", "model": "gemini-test"})
         first = await ensure_provider_source(self.manager)
+        marker = self.manager.persisted[0]["agy_history_id"]
         second = await ensure_provider_source(self.manager)
         self.assertEqual(first, "agy_acp")
         self.assertEqual(second, "agy_acp")
+        self.assertRegex(marker, r"^[0-9a-f]{32}$")
+        self.assertEqual(self.manager.persisted[0]["agy_history_id"], marker)
         self.assertEqual(len(self.manager.persisted_sources), 1)
         self.assertEqual(len(self.manager.provider_sources_config), 1)
+
+    async def test_recreated_model_gets_new_history_identity(self):
+        await self.apply()
+        old = self.manager.providers_config[0]
+        await self.service._manage("provider-delete", old["id"], migrate_default_to="", force_confirm=True)
+        await self.apply()
+        new = self.manager.providers_config[0]
+        self.assertEqual(new["id"], old["id"])
+        self.assertNotEqual(new["agy_history_id"], old["agy_history_id"])
 
     async def test_ensure_provider_source_preserves_other_sources_and_displaces_collision(self):
         other_same_id = {
@@ -612,6 +809,95 @@ class OnboardingTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(bad["status_code"], 400)
+
+    async def test_provider_update_preserves_id_recomputes_modalities_and_repair_fixes_drift(self):
+        self.service.settings = Settings(enable_tools=True, enable_images=True, thought_level="medium")
+        self.service.efforts_by_model["gemini-test"] = ["low", "medium", "high"]
+        resp = await self.call(
+            "apply",
+            {
+                "csrf": self.service.csrf,
+                "model": "gemini-test",
+                "effort": "low",
+                "tools_mode": "chat",
+                "use_default": False,
+            },
+        )
+        self.assertEqual(resp["status_code"], 200)
+        await self.service.job
+        pid = self.service.result["provider_id"]
+        self.assertEqual(self.manager.providers_config[0]["modalities"], ["text", "image"])
+
+        # create_only=True 拒绝重复创建相同变体
+        dup = await self.call(
+            "apply",
+            {
+                "csrf": self.service.csrf,
+                "model": "gemini-test",
+                "effort": "low",
+                "tools_mode": "chat",
+                "use_default": False,
+                "create_only": True,
+            },
+        )
+        self.assertEqual(dup["status_code"], 200)
+        await self.service.job
+        self.assertEqual(self.service.action_error, "CONFIG")
+
+        # 就地编辑保留原 provider_id，并重算 modalities
+        upd = await self.call(
+            "provider-update",
+            {
+                "csrf": self.service.csrf,
+                "provider_id": pid,
+                "model": "gemini-test",
+                "effort": "high",
+                "tools_mode": "tools",
+            },
+        )
+        self.assertEqual(upd["status_code"], 200)
+        await self.service.job
+        self.assertEqual(self.service.action_error, "")
+        self.assertTrue(self.service.result["applied"])
+        self.assertFalse(self.service.result["model_changed"])
+        cfg = self.manager.providers_config[0]
+        self.assertEqual(cfg["id"], pid)
+        self.assertEqual(cfg["custom_extra_body"]["agy_thought_level"], "high")
+        self.assertEqual(cfg["custom_extra_body"]["agy_tools_mode"], "tools")
+        self.assertEqual(cfg["modalities"], ["text", "tool_use", "image"])
+
+        # 模拟原生页面写入 audio 模态与非法 extra 字段，并验证 providers() 检出与修复
+        cfg["modalities"] = ["text", "image", "audio", "tool_use"]
+        cfg["custom_extra_body"]["agy_thought_level"] = "ultra"
+        cfg["custom_extra_body"]["agy_tools_mode"] = "bogus"
+        rows = self.service.providers()
+        self.assertTrue(rows[0]["config_drifted"])
+        self.assertFalse(rows[0]["effective_tools"])
+        self.assertIn("UNSUPPORTED_AUDIO_MODALITY", rows[0]["config_errors"])
+        self.assertIn("INVALID_THOUGHT_LEVEL", rows[0]["config_errors"])
+        self.assertIn("INVALID_TOOLS_MODE", rows[0]["config_errors"])
+
+        rep = await self.call("provider-repair", {"csrf": self.service.csrf, "all": True})
+        self.assertEqual(rep["status_code"], 200)
+        await self.service.job
+        self.assertEqual(self.service.result["repaired_ids"], [pid])
+        self.assertEqual(cfg["custom_extra_body"]["agy_thought_level"], "default")
+        self.assertEqual(cfg["custom_extra_body"]["agy_tools_mode"], "inherit")
+        self.assertEqual(cfg["modalities"], ["text", "tool_use", "image"])
+        self.assertFalse(self.service.providers()[0]["config_drifted"])
+
+    async def test_providers_reads_merged_enable_and_caches_catalog_across_pending_reports(self):
+        self.manager.provider_sources_config.append(
+            {"id": "agy_acp", "type": "agy_acp", "provider_type": "chat_completion", "enable": True}
+        )
+        self.manager.providers_config.append(
+            {"id": "inherited_row", "type": "agy_acp", "provider_source_id": "agy_acp", "model": "gemini-test"}
+        )
+        self.service.cached_models = [{"id": "gemini-test", "name": "Gemini Test"}]
+        self.service.report = {"status": "pending", "stage": "authentication"}
+        snap = self.service.snapshot("admin")
+        self.assertEqual(snap["cached_models"], [{"id": "gemini-test", "name": "Gemini Test"}])
+        self.assertTrue(snap["providers"][0]["enabled"])
 
 
 if __name__ == "__main__":

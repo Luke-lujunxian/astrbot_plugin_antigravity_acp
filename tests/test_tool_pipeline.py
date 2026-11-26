@@ -4,6 +4,7 @@ import importlib
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12,9 +13,9 @@ from tests import astrbot_stub  # noqa: F401
 from tests.test_tools_mode import _load_provider_module
 from agy_provider.config import Settings
 from agy_provider.errors import AgyError
-from agy_provider.messages import ConversationInput
+from agy_provider.messages import ConversationInput, normalize
 from agy_provider.process import LaunchInfo
-from agy_provider.sessions import Runtime
+from agy_provider.sessions import Runtime, decide_reuse
 from agy_provider.tools import ToolSnapshot
 from agy_provider.tool_turn import ToolTurn
 from agy_provider.transport import PermissionDenial
@@ -33,16 +34,62 @@ class ToolPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch("agy_provider.sessions.discover", AsyncMock(return_value=LaunchInfo("fake", "1.5.9", False))))
         self.enterContext(patch("agy_provider.sessions.launch_args", return_value=[sys.executable, str(Path(__file__).with_name("fake_tool_cli.py"))]))
 
-    def turn(self, approver=None):
-        runtime = Runtime(self.settings, self.root)
+    def turn(self, approver=None, *, request=None, settings=None):
+        runtime = Runtime(settings or self.settings, self.root)
         self.addAsyncCleanup(runtime.close)
-        request = ConversationInput(system="", messages=[{"role": "user", "content": "echo"}])
+        if request is None:
+            request = ConversationInput(system="", messages=[{"role": "user", "content": "echo"}])
         meter = runtime.telemetry.start_turn(provider="p", session_key_raw="id", mode="tools", model="gemini-test", effort="default")
         signal = asyncio.Event()
         turn = ToolTurn(runtime, request, "id", "gemini-test", "default", self.snapshot, signal,
                         approver=approver, meter=meter)
         self.addAsyncCleanup(turn.close)
         return runtime, turn, request, signal
+
+    async def test_tool_exchange_preserves_the_persisted_user_hash(self):
+        settings = replace(self.settings, context_compaction_min_peak=200000)
+        request = normalize(
+            [{"role": "user", "content": [
+                {"type": "text", "text": "echo"},
+                {"type": "text", "text": "temporary", "_no_save": True},
+            ]}],
+            None, None, None, settings.history_bytes, tools=True,
+        )
+        runtime, turn, _, signal = self.turn(request=request, settings=settings)
+        async with asyncio.timeout(5):
+            events = [event async for event in turn.events()]
+            call = next(event.result["call"] for event in events if event.kind == "tools")
+            exchange = [
+                {"role": "assistant", "content": "", "tool_calls": [{
+                    "id": call.id, "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                }]},
+                {"role": "tool", "tool_call_id": call.id, "content": "echo result"},
+            ]
+            continuation = normalize(
+                [*request.messages, *exchange], None, None, None, settings.history_bytes,
+                tools=True, continuation=True,
+            )
+            turn.accept(continuation, "gemini-test", "default", self.snapshot, signal, None)
+            final = [event async for event in turn.events()]
+        self.assertEqual(final[-1].text, "echo result")
+
+        replay = normalize(
+            [
+                {"role": "user", "content": "echo"},
+                *exchange,
+                {"role": "assistant", "content": final[-1].text},
+                {"role": "user", "content": "next"},
+            ],
+            None, None, None, settings.history_bytes, tools=True,
+        )
+        session = runtime.sessions["id"]
+        decision = decide_reuse(session, replay, "gemini-test", "default", self.snapshot)
+        self.assertTrue(decision.reuse)
+        self.assertEqual(decision.history_relation, "exact")
+        self.assertEqual(session.sent_window.hashes[0], request.hashes[0])
+        self.assertNotEqual(session.host_expected[0], request.hashes[0])
+        self.assertEqual(session.sent_window.hashes[1:], session.host_expected[1:])
 
     async def test_real_relay_handoff_approval_result_compaction_and_permission_denial(self):
         approver = AsyncMock(return_value=True)

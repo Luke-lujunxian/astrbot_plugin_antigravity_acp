@@ -12,14 +12,16 @@ from astrbot.api.provider import LLMResponse, Provider
 from astrbot.core.provider.entities import TokenUsage
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+from .builtin_tools import BuiltinDenied, builtin_tools_configured
 from .config import Settings
 from .errors import AgyError
-from .media import prepare_media
+from .media import ImageFingerprints, prepare_media
 from .messages import digest, normalize
 from .paths import plugin_data_root
 from .sessions import Runtime
 from .system_prompt import filter_host_capabilities
-from .telemetry import TurnMeter, safe_context, safe_label
+from .telemetry import TurnMeter, provider_tag, safe_context, safe_label
+from .turn_history import HISTORY_ID, instance_tag
 from .tool_turn import chat_events
 from .tools import ToolSnapshot
 
@@ -41,6 +43,68 @@ DEFAULT_CONFIG = {
 }
 _settings = Settings()
 _instances: WeakSet = WeakSet()
+
+
+def _is_temporary(part):
+    if isinstance(part, dict):
+        return part.get("_no_save") is True
+    return getattr(part, "_no_save", False) is True
+
+
+def _temporary_extra_indices(content, extras):
+    """Match AstrBot's assembled [prompt?, *text_extras, *images] layout."""
+    if not isinstance(extras, list) or not any(_is_temporary(p) for p in extras):
+        return []
+    blocks = [p.model_dump() if hasattr(p, "model_dump") else p for p in extras]
+    if not all(isinstance(p, dict) and p.get("type") == "text" for p in blocks):
+        return []
+
+    texts = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            break
+        texts.append(part.get("text"))
+    if any(
+        not isinstance(p, dict) or p.get("type") not in {"image", "image_url"}
+        for p in content[len(texts) :]
+    ):
+        return []
+    offset = len(texts) - len(blocks)
+    if offset not in (0, 1) or texts[offset:] != [p.get("text") for p in blocks]:
+        return []
+    return [offset + i for i, p in enumerate(extras) if _is_temporary(p)]
+
+
+def _restore_user_text_markers(message, original, extras):
+    """Recover persistence flags lost when AstrBot dumps a Message to dict."""
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list):
+        return message
+
+    if isinstance(original, dict):
+        # The modality filter serializes Message objects before calling us,
+        # but the runner also passes the original extra_user_content_parts.
+        if original.get("role") != "user" or any(_is_temporary(p) for p in content):
+            return message
+        marked = _temporary_extra_indices(content, extras)
+    else:
+        source = getattr(original, "content", None)
+        if (
+            getattr(original, "role", None) != "user"
+            or not isinstance(source, list)
+            or len(source) != len(content)
+        ):
+            return message
+        marked = [i for i, p in enumerate(source) if _is_temporary(p)]
+
+    if not marked:
+        return message
+    restored = list(content)
+    for index in marked:
+        part = content[index]
+        if isinstance(part, dict) and part.get("type") == "text":
+            restored[index] = {**part, "_no_save": True}
+    return {**message, "content": restored}
 
 
 def configure(settings: Settings) -> None:
@@ -139,13 +203,14 @@ def instance_monitor_snapshots(manager) -> list[dict]:
                 latest_context["source"] = "acp_usage_update"
         history_now = inst.runtime.telemetry.clock() if active else None
         rows.append({
-            "provider_id": safe_label(provider_id), "model": model,
+            "provider_id": safe_label(provider_id), "provider_tag": provider_tag(provider_id), "model": model,
             "enabled": bool(merged.get("enable")),
             "tools_mode": tools_mode, "effective_mode": "tools" if effective_tools else "chat",
             "tools_enabled": bool(effective_tools),
             "runtime_state": "active" if active else "configured",
             "pool": inst.runtime.pool_stats() if active else None,
             "summary": inst.runtime.telemetry.monitor_summary(now=history_now) if active else None,
+            "history_storage": inst.runtime.telemetry.history_storage if active else None,
             "latest_context": latest_context,
             "recent_turns": inst.runtime.telemetry.safe_recent_turns(20, now=history_now) if active else [],
         })
@@ -239,6 +304,10 @@ class AgyProvider(Provider):
         namespace = digest(self.provider_id)[:16]
         root = plugin_data_root(Path(get_astrbot_plugin_data_path())) / namespace
         self.runtime = Runtime(self.settings, root)
+        self.runtime.telemetry.restore_history(
+            instance_tag(provider_config.get("id"), provider_config.get(HISTORY_ID))
+        )
+        self.image_fingerprints = ImageFingerprints()
         self.warned_tools = False
         _instances.add(self)
 
@@ -283,7 +352,8 @@ class AgyProvider(Provider):
         **kwargs,
     ) -> LLMResponse:
         final = None
-        stream = self.text_chat_stream(
+        stream = self._chat_responses(
+            False,
             prompt=prompt,
             session_id=session_id,
             image_urls=image_urls,
@@ -324,6 +394,34 @@ class AgyProvider(Provider):
         request_max_retries=None,
         **kwargs,
     ) -> AsyncIterator[LLMResponse]:
+        responses = self._chat_responses(
+            True, prompt, session_id, image_urls, audio_urls, func_tool, contexts,
+            system_prompt, tool_calls_result, model, extra_user_content_parts,
+            tool_choice, request_max_retries, **kwargs,
+        )
+        try:
+            async for response in responses:
+                yield response
+        finally:
+            await responses.aclose()
+
+    async def _chat_responses(
+        self,
+        streaming,
+        prompt=None,
+        session_id=None,
+        image_urls=None,
+        audio_urls=None,
+        func_tool=None,
+        contexts=None,
+        system_prompt=None,
+        tool_calls_result=None,
+        model=None,
+        extra_user_content_parts=None,
+        tool_choice="auto",
+        request_max_retries=None,
+        **kwargs,
+    ) -> AsyncIterator[LLMResponse]:
         conversation_id = kwargs.get("conversation_id")
         key = (
             digest([session_id, conversation_id])
@@ -339,6 +437,7 @@ class AgyProvider(Provider):
         extra = self.provider_config.get("custom_extra_body") or {}
         provider_mode = extra.get("agy_tools_mode", "inherit")
         selected = str(model or self.get_model() or "")
+        diagnostic_model = selected if selected == self.get_model() or selected in self.runtime.model_cache else ""
         effort_raw = kwargs.get(
             "agy_thought_level", extra.get("agy_thought_level", "default")
         )
@@ -357,10 +456,20 @@ class AgyProvider(Provider):
         claimed_half_open: tuple[str, str] | None = None
         snapshot = ToolSnapshot(None)
         request = None
-        continuation = False
+        continuation = bool(tool_calls_result)
         request_fingerprint: str | None = None
 
         try:
+            raw_contexts = self._ensure_message_to_dicts(contexts) or []
+            if raw_contexts and prompt is None and not tool_calls_result:
+                latest = _restore_user_text_markers(
+                    raw_contexts[-1], contexts[-1], extra_user_content_parts
+                )
+                if latest is not raw_contexts[-1]:
+                    raw_contexts = [*raw_contexts[:-1], latest]
+            continuation = continuation or bool(
+                prompt is None and raw_contexts and raw_contexts[-1].get("role") == "tool"
+            )
             if approver is not None and not inspect.iscoroutinefunction(approver):
                 raise AgyError(
                     "TOOL_CONTEXT", "agy_tool_approver 必须为异步宿主审批回调。"
@@ -385,6 +494,7 @@ class AgyProvider(Provider):
                 logger.warning("AGY enable_tools=false，未向 CLI 提供宿主工具。")
                 self.warned_tools = True
             snapshot = ToolSnapshot(func_tool if tools_for_prompt else None)
+            allow_builtins = bool(tools_for_prompt and builtin_tools_configured(self.settings))
             if snapshot.skipped:
                 logger.warning(
                     f"AGY 工具桥跳过 {len(snapshot.skipped)} 个不兼容工具 schema："
@@ -394,14 +504,13 @@ class AgyProvider(Provider):
                 raise AgyError(
                     "TOOL_CONTEXT", "工具调用需要宿主会话身份及 abort_signal 生命周期。"
                 )
-            raw_contexts = self._ensure_message_to_dicts(contexts) or []
             raw_contexts, parts = await await_or_abort(
                 prepare_media(
                     raw_contexts,
                     prompt,
                     extra_user_content_parts,
                     image_urls,
-                    self.settings,
+                    self.settings, cache=self.image_fingerprints, scope=key,
                 ),
                 signal,
             )
@@ -502,14 +611,17 @@ class AgyProvider(Provider):
                 meter = self.runtime.telemetry.start_turn(
                     provider=self.provider_id,
                     session_key_raw=key,
-                    mode="tools" if snapshot.tools else "chat",
-                    model=selected,
+                    mode="tools" if (snapshot.tools or allow_builtins) else "chat",
+                    model=diagnostic_model,
                     effort=effort,
                     system_bytes=request.system_bytes,
                     system_hash8=(request.system_hash or "")[:8],
                     transient_bytes=len((request.transient_data or "").encode()),
                     tool_schema_bytes=snapshot.schema_bytes,
                 )
+
+            if logical_request_id and meter.logical_request_tag is None:
+                meter.logical_request_tag = self.runtime.telemetry.opaque_tag(logical_request_id)
 
             if not continuation and not is_existing_turn:
                 guard_check = await self.runtime.failure_guard.check(
@@ -537,9 +649,6 @@ class AgyProvider(Provider):
                 claimed_half_open = guard_check.half_open_scope
         except BaseException as exc:
             self.runtime.failure_guard.release_probe(claimed_half_open)
-            if isinstance(exc, AgyError) and meter is not None and meter.tool_calls:
-                exc.no_retry = True
-                exc.no_fallback = True
             cancelled = isinstance(exc, asyncio.CancelledError)
             code = exc.code if isinstance(exc, AgyError) else ("CANCELLED" if cancelled else "CONFIG")
             if meter is None:
@@ -547,9 +656,13 @@ class AgyProvider(Provider):
                     provider=self.provider_id,
                     session_key_raw=key,
                     mode="tools" if snapshot.tools else "chat",
-                    model=selected,
-                    effort=effort if isinstance(effort, str) else "default",
+                    model=diagnostic_model,
+                    effort=effort if isinstance(effort, str) and effort in {"low", "medium", "high", "default"} else "",
                 )
+            if continuation:
+                meter.tool_result_supplied = True
+            if meter.replay_blocked and isinstance(exc, AgyError):
+                exc.no_retry = exc.no_fallback = True
             if not meter.finished:
                 meter.finish(
                     status="cancelled" if cancelled else "error", error_code=code
@@ -557,6 +670,8 @@ class AgyProvider(Provider):
             if owns_existing_turn and self.runtime.turns.get(key) is existing_turn:
                 self.runtime.turns.pop(key, None)
                 await existing_turn.close()
+            if meter.replay_blocked and isinstance(exc, Exception) and not isinstance(exc, AgyError):
+                raise AgyError("UPSTREAM", "工具交接后失败，已停止本轮。", no_retry=True, no_fallback=True) from None
             raise
 
         if key is not None and not owns_existing_turn and not continuation:
@@ -610,6 +725,7 @@ class AgyProvider(Provider):
                 logical_request_id=logical_request_id,
                 request_fingerprint=request_fingerprint,
                 claimed_half_open=claimed_half_open,
+                allow_builtins=allow_builtins,
             )
         else:
             source = self.runtime.stream(
@@ -617,13 +733,17 @@ class AgyProvider(Provider):
                 key,
                 selected,
                 effort,
+                snapshot,
                 meter=meter,
                 provider_id=self.provider_id,
                 logical_request_id=logical_request_id,
                 request_fingerprint=request_fingerprint,
                 continuation=False,
                 claimed_half_open=claimed_half_open,
+                allow_builtins=allow_builtins,
             )
+        if continuation:
+            meter.tool_result_supplied = True
         events = abortable(source, signal)
         text_parts, thoughts = [], []
         handed_off = False
@@ -633,11 +753,13 @@ class AgyProvider(Provider):
         try:
             async for event in events:
                 if event.kind == "text":
+                    meter.observe_chunk(event.kind, event.text, streaming=streaming)
                     text_parts.append(event.text)
                     yield LLMResponse(
                         role="assistant", completion_text=event.text, is_chunk=True
                     )
                 elif event.kind == "thought":
+                    meter.observe_chunk(event.kind, event.text, streaming=streaming)
                     thoughts.append(event.text)
                     yield LLMResponse(
                         role="assistant",
@@ -651,7 +773,7 @@ class AgyProvider(Provider):
                         (event.result or {}).get("omitted_messages", 0),
                     )
                 elif event.kind == "tools":
-                    handed_off = True
+                    handed_off = meter.tool_handed_off = True
                     call = event.result["call"]
                     yield LLMResponse(
                         role="assistant",
@@ -678,6 +800,25 @@ class AgyProvider(Provider):
                         usage=token_usage(result),
                         is_chunk=False,
                     )
+            if not done_seen and not handed_off:
+                raise AgyError("EMPTY", "AGY 未返回最终响应。")
+        except BuiltinDenied as exc:
+            exit_status, exit_code = "error", exc.code
+            if meter.replay_blocked or handed_off or continuation:
+                raise
+            # Runtime retired the failed native session and recorded its cost.
+            # Deliver a local terminal message; a new user turn can proceed.
+            notice = getattr(exc, "user_notice", None)
+            if notice:
+                # With tools disabled no AstrBot tool is offered through this plugin.
+                notice += ("你可以继续提问。" if exc.code == "TOOLS_DISABLED"
+                           else "你可以继续提问，或使用 AstrBot 已启用的工具。")
+            else:
+                notice = "本轮请求了受限的 CLI 内置工具，无法继续取得结果。你可以继续提问，或使用 AstrBot 已启用的工具。"
+            done_seen = True
+            if streaming:
+                yield LLMResponse(role="assistant", completion_text=notice, is_chunk=True)
+            yield LLMResponse(role="assistant", completion_text=notice, is_chunk=False)
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 exit_status = "cancelled"
@@ -687,20 +828,28 @@ class AgyProvider(Provider):
                 exit_code = exc.code
                 # Surface an explicit failure after partial delivery. Neither
                 # this provider nor callers honoring no_retry may replay it.
-                if text_parts or thoughts or handed_off or meter.tool_calls:
+                if meter.replay_blocked:
                     exc.no_retry = True
                     exc.no_fallback = True
             else:
                 exit_status = "error"
                 exit_code = "UPSTREAM"
-                if isinstance(exc, Exception) and (text_parts or thoughts or handed_off or meter.tool_calls):
+                if isinstance(exc, Exception) and meter.replay_blocked:
                     raise AgyError(
                         "UPSTREAM", "本轮已输出内容或交接工具后失败；已停止，禁止自动重放。",
                         no_retry=True, no_fallback=True,
                     ) from None
             raise
         finally:
-            await events.aclose()
+            try:
+                await events.aclose()
+            except Exception as exc:
+                if meter.replay_blocked or done_seen:
+                    if isinstance(exc, AgyError):
+                        exc.no_retry = exc.no_fallback = True
+                        raise
+                    raise AgyError("UPSTREAM", "结束已交付回合时失败。", no_retry=True, no_fallback=True) from None
+                raise
             if not handed_off and not done_seen and not meter.finished:
                 self.runtime.failure_guard.release_probe(claimed_half_open)
                 meter.finish(status=exit_status, error_code=exit_code)

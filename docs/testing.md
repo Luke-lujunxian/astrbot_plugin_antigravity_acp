@@ -1,6 +1,6 @@
 # 测试、验收与交付规范
 
-适用基线 **v0.7.5**，Python **3.11+**、AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。数量由本次运行得出，不把旧版本测试总数当作当前结果。
+适用于当前插件版本、Python **3.11+** 和 AstrBot **`>=4.29.4,<4.30`**。先读 [AGENTS.md](../AGENTS.md) 的安全边界，按 [架构索引](architecture.md#故障定位索引) 找既有测试。报告使用本次运行的计数。
 
 ## 开发流程
 
@@ -41,17 +41,56 @@ python -m unittest tests.test_telemetry tests.test_monitoring -v
 # 启动、认证、登录、模型保存
 python -m unittest tests.test_auth_config tests.test_login tests.test_diagnostics tests.test_onboarding -v
 
-# 原生设置页交互（DOM/bridge 替身）
+# 原生可视化 Dashboard 语法与 DOM 回归
+node --check views/setup/app.js
 node --test tests/setup.test.mjs
 ```
 
 对于单项故障，可在已定位测试类后继续指定单个方法；不要假定测试文件名与旧分支相同。源路径映射见 [故障定位索引](architecture.md#故障定位索引)。
 
-图片回归（#24 仅验证重建附件边界；不代表历史媒体预检已消除）：
+图片回归（#24 / #32：当前附件、历史媒体占位及会话复用）：
 
 ```sh
 python -m unittest tests.test_prompt_images tests.test_media tests.test_sessions -v
 ```
+
+新增 #32 定向回归：
+
+```sh
+python -m unittest tests.test_routing tests.test_b06_side_effects tests.test_b07_b08_regressions tests.test_failure_events -v
+```
+
+v0.8.1 恢复原生 DOM 回归，v0.8.3（#36）在此基础上覆盖三标签页切换、路由与配置漂移告警、本地目录缓存、弹窗防覆盖、原地编辑 `provider-update`、批量同步 `provider-repair` 与受控迁移 `provider-impact` 等交互，真实 iframe/多端视觉回归仍需在宿主中单独检查。
+
+### 模型管理、路由交互（#36）与工具权限 / 额度 / 只读梯队（#38 / #41）
+
+```sh
+python -m unittest tests.test_onboarding tests.test_routing tests.test_main_init tests.test_issue38_permissions tests.test_issue38_quota tests.test_issue38_daily tests.test_issue41_readonly_builtins tests.test_commands -v
+node --check views/setup/app.js
+node --test tests/setup.test.mjs
+```
+
+> `v0.8.4` 新增对工具权限注册表、Linux `1.5.17`/`1.5.18` `read_file` 分页参数、无宿主 MCP 解耦、非搜索拒止提示、额度快照缓存与本地每日用量统计的回归覆盖（`tests/setup.test.mjs` 扩至 42 项）。
+
+### 会话复用（#33）
+
+```sh
+python -m unittest tests.test_tools_mode tests.test_tool_pipeline tests.test_sessions -v
+```
+
+重点核对临时文本仍发给模型，宿主按持久化文本回放时复用，真实历史编辑时重建，以及工具续轮后用户消息和工具记录仍能匹配。
+
+### 额度刷新与近 24 小时明细恢复（#43）
+
+```sh
+python -m unittest tests.test_issue38_quota tests.test_issue38_daily tests.test_onboarding tests.test_main_init tests.test_monitoring tests.test_telemetry tests.test_turn_history -v
+node --check views/setup/app.js
+node --test tests/setup.test.mjs
+```
+
+定向检查覆盖注册路由、缓存命中与重试、跨登录环境隔离、页面进入和恢复、迟到响应、请求明细恢复、UTC 保留窗口、数量和大小上限、进程退出、落盘字段和存储故障降级。
+
+实机验收在受支持的 AstrBot 和已登录的官方 CLI 上进行。首次进监控和 60 秒后再进各观察一次按需查询，60 秒内重进与面板保持打开时确认 CLI 调用计数。发送数轮短消息，记录耗时、复用率、Token、每日热力图和会话池。先重载插件，再完整重启 AstrBot，核对明细连续、会话池重新建立、用量与失败诊断无重复。追加一轮请求确认统计只增加一次。
 
 ## 全量离线回归
 

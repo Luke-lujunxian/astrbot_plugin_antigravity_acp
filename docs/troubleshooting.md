@@ -1,13 +1,13 @@
 # Agent 排障 SOP
 
-适用基线 **v0.7.5 / AstrBot `>=4.29.4,<4.30`**。安全边界见 [AGENTS.md](../AGENTS.md)，源码/测试映射见 [故障定位索引](architecture.md#故障定位索引)。以下流程不要求读取任何凭据或完整人格内容。
+适用于当前插件版本与 AstrBot **`>=4.29.4,<4.30`**。版本见 [metadata.yaml](../metadata.yaml)，安全边界与源码入口见 [AGENTS.md](../AGENTS.md) 和 [故障定位索引](architecture.md#故障定位索引)。
 
 ## 先确定失败阶段
 
 1. 记录插件/宿主/Python/CLI 版本、部署方式、AstrBot 实际系统用户、容器内路径、请求模式及模型/档位；区分“最初出错提交”和“当前排查提交”。
 2. 管理员执行 `/agy doctor` 或在首次设置页重新检测。收集脱敏的 `stage`、`error_code`、CLI `exit_code`；只收必要字段，不粘贴整份环境变量、配置、stdout/stderr 或授权材料。
 3. 分开判断：发现/启动 CLI → 官方登录 → `initialize` → `session/new` / 目录 → 保存 Provider → `session/prompt` 生成 → MCP 许可/宿主执行/回填 → 最终正文。某阶段通过不能代替下一阶段通过。
-4. 失败后先检查本轮是否已有正文、thought 或工具交接；有则停止自动重试/fallback，避免副作用重复。先诊断，不以重新登录、重装、清空目录或放开 CLI 内置能力作为通用修复。
+4. 失败后先检查本轮是否已有可见正文、工具交接或工具结果续轮；有则停止自动重试/fallback，仅思考/进度且未交接时按显式资格处理，避免副作用重复。先诊断，不以重新登录、重装、清空目录或放开 CLI 内置能力作为通用修复。
 
 `/agy setup` 提供设置入口；`/agy use <provider_id>` 只更改命令所在目标会话的偏好。聊天命令需要聊天管理员身份；普通用户无响应不等于 CLI 故障。
 
@@ -78,7 +78,7 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 
 若许可已通过但没有 tools/call，继续查 CLI/relay；若已到宿主，检查原始参数 schema、预算、审批与回填，不再归因“一次性许可被取消”。不要把 #12 的离线/回声桩结论扩大到所有生产工具和 QQ 链路。
 
-`TOOL_PERMISSION` 和工具守卫仅缓解 #11 的错误归因/误用；CLI 在内置工具被拒后未回喂模型就结束的问题仍存在。不要把 issue 关闭理解为该上游行为已经修复，或把未独立观测的宿主执行次数当作已知。
+已识别的内置工具被拒且尚无正文、工具交接或执行时，Provider 可用一条本地提示结束这轮，对话可继续（仅 `search_web` 提示搜索请求可能已发出，其余非搜索内置工具使用非搜索拒止文案）。CLI 可能直接结束 prompt，插件不重发。遇到 `search_web` 时优先使用宿主 MCP 搜索。实际运行边界与 `1.5.18` 实测结论见[工具策略](api.md#工具策略)与 [原生工具调查报告](issue41-builtin-tools-probe.md)。
 
 入口：[transport.py](../agy_provider/transport.py)、[tools.py](../agy_provider/tools.py)、[tool_turn.py](../agy_provider/tool_turn.py)、[sessions.py](../agy_provider/sessions.py)。测试：`tests.test_mcp_permissions`、`tests.test_permission_attribution`、`tests.test_tool_pipeline`。
 
@@ -97,17 +97,27 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 - 登录入口是 WebUI 或官方 `agy acp --login`；不支持该参数时由用户在同环境交互运行 `agy`，之后重新检测。不默认推荐未经当前 CLI 核验的 `agy login`。
 - 当前后端仅接收去除首尾空白后 1–4096 字符的单行授权码，拒绝控制字符；**没有解析完整 localhost 回调 URL**。用户只在自己的设置页提交，不发到聊天/issue。URL 只对当前拥有者可见，总预算 300 秒、取 URL 最多 45 秒；插件重载会取消旧流程，旧 ticket 不复用。
 - 登录 CLI 退出 0 后还需 ACP 会话及模型目录复检；`auth_bridge=false` 只关闭文件桥，不保证隔离会话能使用钥匙串，也不是通用修复。
-- 模型来自账号实际目录，Provider 列表有缓存；保存会复检。切换模型后重置并读取档位选项，不能承诺每个模型都支持 low/medium/high。相同模型及相同配置档位才复用 Provider。
-- 保存结果非空但 `default_selected=false` / `action_error=HOST` 可能是部分成功；全局默认不覆盖已有会话独立偏好。检查目标聊天的 `/agy use`、实例启用状态和 agy_tools_mode。
+- 模型来自账号实际目录，前端按 `efforts_by_model` 缓存各模型思考档位；切换模型仅按缓存重置档位而不自动重发 `setup/check`，需刷新目录时点击「刷新目录」或「重新检测」，保存会复检。`setup/apply` 新建同配置组合前应核对查重；需更换已有实例的底层模型、思考或模式但保留原有 `/agy use` 及默认绑定 ID 时，在「模型管理」使用「编辑」（`setup/provider-update`，更换底层模型会在下轮重构会话上下文）。
+- 全局总闸（如 `enable_images`）或 `modalities` 出现漂移时，列表会标记「需同步」并弹出顶部恢复条，可通过「修复」/「一键同步」（`setup/provider-repair`）对齐合并配置。停用或删除当前全局默认实例前先经过 `setup/provider-impact` 检查引用，并在弹窗中选定 `migrate_default_to` 替代项（或显式置空触发二次确认）；保存结果非空但 `default_selected=false` / `action_error=HOST` 可能是部分成功，全局默认不覆盖已有会话独立偏好，排查目标聊天时结合 `/agy use`、实例启用状态与 `agy_tools_mode` 核对。
 - 旧名配置迁移须备份并避开宿主并发写；新配置存在则合并所需字段，不覆盖整份。禁用旧插件防止 `agy_acp` 重复注册，另查 command 包装脚本是否绑定旧数据目录。
+
+## 会话复用与历史重写
+
+1. v0.8.2 修复了临时用户文本仅发送一轮却导致后续误判历史变更的情况。升级并重载插件后，在同一会话沿用同一模型、人格和工具设置，连续发送至少两条普通文本消息。
+2. 在监控里的逐轮记录检查 `reused`、`history_relation` 与 `primary_reason`。回放与预期历史完全匹配、会话仍可用时，后续轮应显示 `reused=true` 和 `history_relation=exact`。
+3. 若仍反复出现 `history_rewrite`，先核对是否发生宿主历史编辑或摘要替换，以及近期注入的块能否由宿主提供临时标记。报告时附插件、AstrBot、AGY CLI 版本和脱敏逐轮字段即可。缺少会话身份的调用会显示 `no_identity`。
+
+复用率统计的是插件是否沿用 ACP 会话，缓存 Token 比例统计的是上游报告的缓存用量。可结合逐轮数据排查。[会话历史机制](architecture.md#会话历史与防重放) · [#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33)
 
 ## 工具、图片与监控
 
 - 工具/图片要同时开启插件总闸和宿主对应 modalities，修改插件设置后重载。工具还要有真实 ToolSet、稳定身份和取消信号；`tool_choice=required` 或指定函数不受支持。chat 模式不会注入工具。
 - 图片还需 CLI image 能力；默认 8 张是可配置值而非固定硬上限。校验 PNG/JPEG 的真实编码，限制像素/字节，下载遵守 DNS/IP/重定向 SSRF 边界，本地路径限定 `media_roots`。宿主提前过滤的图片无法由 Provider 恢复。
-- **v0.7.4 图片修复的边界（#24）**：会话重建时，`prompt_blocks()` 仅附带当前用户轮的图片，旧图改为哈希占位；但 `prepare_media()` 仍对历史消息中的图片源逐一读取、验证并计入图片数量/字节限制。旧图失效或长历史累积过多可能在发给 AGY 之前报 `IMAGE*`/预算错误；这不是已修复的重复发送，也不能靠调高预算或放宽 SSRF/本地目录边界作为通用修复。优先收集脱敏的消息数、历史图片数、源类型、具体错误码，见 [计划状态索引](plan-status.md#待处理与待验证)。
-- `/agy cost` 和 `monitor/status` 只读本地样本。实时池、近 24 小时、最近上下文采样是不同口径；未知 usage/占用不能显示成 0 或余额。重启后无历史不代表从未消耗。
+- **历史图片（#24 / #32）**：v0.8.0 会话重建只附带当前用户轮图片，历史图使用占位与指纹，不再占用当前真实附件预算。当前图片仍执行源、能力及预算校验；排障收集脱敏的消息数、历史/当前图片数、源类型和错误码，不放宽 SSRF/本地目录边界。
+- `/agy cost` 和 `monitor/status` 只读本地样本。近 24 小时明细可跨重载恢复，会话池和上下文以当前运行时为准。看到「仅内存统计」时，核对宿主实例配置标记与插件数据目录的写权限、文件类型和 SQLite 锁。恢复权限后重载插件。若需回退，恢复已验插件版本并重载，保留宿主配置、登录态及统计文件。
+- 额度卡片进入时先读缓存，时间标签对应实际采样。短期失败待冷却后重新进入，或使用「刷新额度」。遇到认证问题时完成官方登录后再查询。 [额度接口](api.md#官方-cli-额度)
 - monitor 返回 401/403 时核对 Dashboard 配置管理员；API Key 被该 endpoint 明确拒绝，不关闭鉴权。不要把聊天管理员权限当作 Dashboard 身份。
+- 默认模型异常时分别核对配置主项、解析主项和服务观测；不要将已初始化实例视作当前服务。失败诊断按 #32 的有界脱敏记录核对。
 - WebUI 使用原生 iframe bridge、当前 nonce 与轮询终态；旧响应、登录归属、复制、窄屏/主题等按 [实机验收](testing.md#实机验收) 单独检查。
 - 面板复制按钮依赖「用户手势内」的同步降级链：宿主 iframe 为 `sandbox="allow-scripts allow-forms allow-downloads"`（无 `allow-same-origin`/`clipboard-write`），且面板多为 `http://<ip>:6185` 非安全上下文，`navigator.clipboard` 不存在属预期。只能先试 Clipboard API，再同步 `execCommand("copy")`，最后退回选中文本；不要改成 `await` 之后再复制，那会丢掉手势导致 `execCommand` 返回 false。授权链接无法新开窗口是宿主未授 `allow-popups`，页面只能提示改用复制。
 
@@ -116,3 +126,10 @@ python -m agy_provider.probe --command /absolute/path/to/agy --timeout 60
 无生成自检只证明当时配置下的启动、认证/握手、会话与目录链路。继续核对真实调用的模型/档位、实例开关、会话旧偏好、历史预算、图片与工具上下文、输出/队列限制，再判断生成阶段的上游错误。
 
 按 [报告模板](testing.md#交付报告) 记录已确认事实、待验证推断、环境差异与下一步；真实生成、工具、跨平台认证、长期刷新分别验收，不用“检测通过”概括为全面可用。
+
+
+## 私聊中 /agy cost 被当成对话
+
+1. 在 AstrBot WebUI 找到该会话实际使用的配置。在「可用插件」列表（plugin_set）中保留已有项并勾选 astrbot_plugin_antigravity_acp，保存。检查会话级插件开关和唤醒前缀。
+2. 用同一管理员私聊发送 /agy help 和 /agy cost。再用非管理员发送 /agy cost，应只收到权限提示。两者都应停留在指令处理阶段。
+3. /new 由宿主保留插件提供，可单独命中。若 /agy 仍落入 LLM，核对当前配置绑定、插件启用状态、管理员 ID 字符串、加载版本及热重载记录。

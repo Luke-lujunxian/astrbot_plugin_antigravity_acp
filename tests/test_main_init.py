@@ -7,7 +7,7 @@ import types
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from agy_provider.config import Settings
 
@@ -120,8 +120,16 @@ class MainInitializeTests(unittest.IsolatedAsyncioTestCase):
 
             return decorator
 
+        def fake_custom_filter(filter_type):
+            def decorator(fn):
+                fn.command_filter = filter_type()
+                return fn
+            return decorator
+
         filter_obj = types.SimpleNamespace(
             command_group=fake_command_group,
+            custom_filter=fake_custom_filter,
+            CustomFilter=object,
             permission_type=lambda *a, **kw: (lambda fn: fn),
             PermissionType=types.SimpleNamespace(ADMIN="admin"),
         )
@@ -211,6 +219,43 @@ class MainInitializeTests(unittest.IsolatedAsyncioTestCase):
         )
         context.register_web_api = lambda *args: context.registered_web_apis.append(args)
         return context
+
+    async def test_bare_agy_bypasses_host_group_tree_and_uses_admin_handler(self):
+        main_mod, _ = self._load_main_module()
+        plugin = main_mod.AgyProviderPlugin(self._make_context(FakeProviderManager()))
+        event = types.SimpleNamespace(
+            message_str=" agy ", is_at_or_wake_command=True, is_admin=lambda: False,
+            should_call_llm=MagicMock(), stop_event=MagicMock(), send=AsyncMock(),
+            plain_result=lambda text: text,
+        )
+        group_filter = plugin.agy.command_filter
+        root_filter = plugin.agy_root.command_filter
+        self.assertFalse(group_filter.filter(event, None))
+        self.assertTrue(root_filter.filter(event, None))
+        self.assertEqual([result async for result in plugin.agy_root(event)], [])
+        event.send.assert_awaited_once_with("AGY [FORBIDDEN] 仅管理员可使用此指令。")
+        event.stop_event.assert_called_once()
+        event.should_call_llm.assert_called_once_with(True)
+        event.is_admin = lambda: True
+        self.assertEqual([result async for result in plugin.agy_root(event)], [main_mod.HELP])
+        event.is_at_or_wake_command = False
+        self.assertFalse(root_filter.filter(event, None))
+        event.is_at_or_wake_command = True
+        event.message_str = "agy quota"
+        self.assertFalse(root_filter.filter(event, None))
+        self.assertTrue(group_filter.filter(event, None))
+
+    async def test_quota_command_reports_service_close(self):
+        main_mod, _ = self._load_main_module()
+        plugin = main_mod.AgyProviderPlugin(self._make_context(FakeProviderManager()))
+        refresh = AsyncMock(side_effect=main_mod.AgyError("CLOSED", "插件已停用。"))
+        plugin.setup_service = types.SimpleNamespace(
+            login=types.SimpleNamespace(busy=False), quota=types.SimpleNamespace(refresh=refresh),
+        )
+        event = types.SimpleNamespace(
+            is_admin=lambda: True, should_call_llm=MagicMock(), plain_result=lambda text: text,
+        )
+        self.assertEqual([text async for text in plugin.quota(event)], ["AGY [CLOSED] 插件已停用。"])
 
     async def test_initialize_repairs_invalid_config_updates_and_saves(self):
         main_mod, fake_logger = self._load_main_module()
@@ -314,6 +359,40 @@ class MainInitializeTests(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
         self.assertTrue(plugin.registered)
         self.assertNotIn("provider_source_id", manager.providers_config[0])
+
+    async def test_initialize_restores_curr_provider_inst_to_configured_primary(self):
+        main_mod, _ = self._load_main_module()
+        manager = FakeProviderManager()
+        non_acp = object()
+        acp_inst = object()
+        manager.inst_map = {"openai_first": non_acp, "agy_primary": acp_inst}
+        manager.provider_insts = [non_acp]
+        manager.curr_provider_inst = non_acp
+        manager.providers_config.extend([
+            {"id": "openai_first", "type": "openai", "enable": True},
+            {"id": "agy_primary", "type": "agy_acp", "model": "gemini-test", "enable": True},
+        ])
+        manager.acm.default_conf["agent_runner"] = {
+            "runner_type": "local",
+            "config": {"model": {"provider_id": "agy_primary", "fallback_provider_ids": []}},
+        }
+
+        async def reload_with_implicit_first(config):
+            manager.inst_map[config["id"]] = acp_inst
+            manager.provider_insts.append(acp_inst)
+            # 模拟宿主 reload() 在 curr_provider_inst 为空时漂移回第一个非 ACP 实例
+            manager.curr_provider_inst = non_acp
+
+        manager.reload = reload_with_implicit_first
+        setattr(manager, main_mod.RESTORE_IDS, {"agy_primary"})
+        plugin = main_mod.AgyProviderPlugin(
+            self._make_context(manager), config=FakePluginConfig({"setup_auto_check": False})
+        )
+        self.addAsyncCleanup(plugin.terminate)
+
+        await plugin.initialize()
+
+        self.assertIs(manager.curr_provider_inst, acp_inst)
 
 
 if __name__ == "__main__":

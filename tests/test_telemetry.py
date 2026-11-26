@@ -241,7 +241,7 @@ class TelemetryTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIn("只读，未发送模型请求", report)
-        self.assertIn("reuse=strict", report)
+        self.assertIn("复用 strict", report)
         self.assertIn("100.0%", report)  # unavailable_ratio = 1/1
 
     async def test_precheck_failure_still_emits_not_sent_record(self):

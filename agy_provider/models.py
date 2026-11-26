@@ -66,11 +66,13 @@ async def select(client: AcpClient, result: dict, model: str, effort: str) -> li
     current = (model_option or {}).get("currentValue") or (
         result.get("models") or {}
     ).get("currentModelId")
+    confirmed = current == model
     if current != model:
         if model_option:
             changed = await client.set_option(model_option["id"], model)
             config = options(changed) or config
             actual = find_option(config, "model")
+            confirmed = bool(actual and actual.get("currentValue") == model)
             if actual and actual.get("currentValue") not in {None, model}:
                 raise AgyError("MODEL", "AGY 未切换到请求的模型。")
         elif (result.get("models") or {}).get("availableModels"):
@@ -82,8 +84,11 @@ async def select(client: AcpClient, result: dict, model: str, effort: str) -> li
             # Legacy set_model may not report updated config options. Do not
             # advertise or apply the previous model's thought levels in that case.
             config = options(changed)
+            reported = (find_option(config, "model") or {}).get("currentValue")
+            confirmed = (reported or (changed.get("models") or {}).get("currentModelId")) == model
         else:
             raise AgyError("UNSUPPORTED", "此 CLI 没有提供模型选择能力。")
+    client.confirmed_model = model if confirmed else None
     if effort == "default":
         return config
     level = find_option(config, "thought_level")
@@ -95,6 +100,9 @@ async def select(client: AcpClient, result: dict, model: str, effort: str) -> li
         )
     if level.get("currentValue") != effort:
         changed = await client.set_option(level["id"], effort)
+        updated_model = find_option(options(changed), "model")
+        if updated_model:
+            client.confirmed_model = model if updated_model.get("currentValue") == model else None
         actual = find_option(options(changed), "thought_level")
         if actual and actual.get("currentValue") not in {None, effort}:
             raise AgyError("UNSUPPORTED", "AGY 未应用所选思考档位。")

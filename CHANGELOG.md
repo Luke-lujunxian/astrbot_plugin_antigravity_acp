@@ -1,5 +1,46 @@
 # 变更记录
 
+## 0.8.5（2026-11-26）
+
+- **账号额度自动刷新（#43 / [PR #44](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/44)）**：首次进入监控页、页面恢复及登录结束后先读取缓存，缺失或过期才通过官方 CLI 查询；60 秒成功缓存、并发合并、失败冷却与原手动强制刷新并存，GET 无副作用，无常驻额度轮询。
+- **近 24 小时监控明细跨重载恢复**：新增独立 `turn-history-v1.sqlite3` 与持久匿名实例关联，保存每实例最多 100 轮、全库最多 2,000 轮脱敏统计，主库上限 8 MiB；恢复耗时、请求计数、Token 与复用率，不重复累计既有每日用量或失败事件。存储异常降级为内存统计；ACP 会话池、当前上下文及进程状态仍来自本次运行时，不保存对话正文、凭据或工具参数。
+- **验证与限制**：PR #44 [CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45840247494) 四组 Ubuntu/Windows × Python 3.11/3.12 回归通过；PR 报告记录 Node 45 项通过、Linux Docker / AstrBot 4.29.4 / CLI 1.5.18 真实额度查询、并发缓存、运行时重建与独立进程恢复验证。管理员 iframe 交互及带生产历史样本的宿主整进程重启仍待验收。旧版未落盘明细不可回填；可回退至 v0.8.4 并保留宿主配置与统计文件。
+
+## 0.8.4（2026-11-26）
+
+- **内置工具独立权限与实验性搜索（#38 / [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)）**：新增独立「工具权限」页签与 `POST setup/tool-policy` 接口，支持单独持久化 `builtin_read_file` 与实验性 `builtin_search_web` 而不覆盖既有提供商配置，展示未生效总闸告警与待重载琥珀色徽标并折叠收纳固定拒绝项；`search_web` 关闭时经模型护栏与事后观察中止，开启后按通知计入与 MCP 共用的 `tool_max_calls` 预算，面板与聊天提示均如实说明事后观测局限。
+- **官方 CLI 账号额度与本地每日用量（#38 / [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/38)）**：新增 `QuotaService` 按需查询官方 CLI 账号额度（不读 OAuth 凭据，60 秒 TTL、并发合并、30 秒超时、跨环境失效与脱敏错误码），「运行监控」新增中文化额度窗口与超 3 项模型列表折叠抽屉；新增 `daily-usage-v1.sqlite3` 按宿主本地日历持久化每日用量并提供 90/30/365 天纯 SVG 热力图与模型/指标筛选。
+- **私聊管理员指令与面板 UX 优化**：重构 `/agy help|setup|use|quota|usage|cost|doctor|status|models` 输出格式为简洁中文可读文本（剔除原始 JSON 与 UTC ISO 时间戳，`/agy quota` 转宿主本地 `MM/DD HH:MM` 与倒计时以避免 QQ 识别日期链接）；未就绪阻塞态增加顶部「前往配置 →」引导条，活跃 0 请求实例收敛为单行紧凑状态；非管理员裸 `/agy` 不再泄漏子指令清单。
+- **CLI `1.5.18` 只读原生工具实测、统一注册表与无 MCP 解耦（#41 / [PR #42](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/42)）**：完成 Linux 官方 `Antigravity ACP Server 1.5.18`（无 MCP `mcpServers: []`）实测，确认 `read_url`/`list_dir`/`find_by_name`/`grep_search` 在 `agy acp 1.5.18` 未暴露（目录与检索均退化为 `run_command` 任意 shell 执行，继续锁定拒绝），详见 [CLI 1.5.18 原生工具调查报告](docs/issue41-builtin-tools-probe.md)；新增 `BuiltinToolSpec` 与 `BUILTIN_SPECS` / `KNOWN_BUILTIN_NAMES` 统一注册表覆盖 `edit_file` 与 1.5.18 全量内部调度/子代理工具拒止；开放 `read_file` 至 Linux CLI `1.5.17`/`1.5.18` 并支持 `StartLine`/`EndLine`/`ByteOffset` 严格整数边界与帧间一致性校验（拒绝 `file:///` URI）；解除原生工具对宿主 MCP 非空的依赖（纯内置模式不启动多余 `mcp_bridge.py` 子进程），并修复非搜索内置工具拒止误报 `SEARCH_ABORTED_NOTICE` 的问题。
+- **验证与实机**：Windows 本地 Python 离线回归 352 项通过（23 项 Linux/POSIX 跳过）、Linux 容器（Python 3.12.13）离线回归 352 项通过（17 项 Windows 跳过）、前端 `node --test tests/setup.test.mjs` 42/42 通过、`compileall` / `check_sensitive.py` / `git diff --check` 与 PR #39 / #42 GitHub Actions（Ubuntu/Windows × Python 3.11/3.12）全部通过；已在生产测试宿主（`xiaoyu`，AstrBot 4.29.4 Docker + CLI `1.5.18`）验证无生成 `probe()`（`verified_read=true`）、无 MCP `read_file` 按行分页真实调用（`calls=grants=1`, `server=None`）、插件热部署加载及 `/agy` 指令格式；Windows、macOS、CLI `>=1.5.19` 与 AstrBot `4.30` 尚未完成实机工具验收。
+
+## 0.8.3（2026-11-25）
+
+- **WebUI 三标签页与交互重构（#36 / [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）**：保留 AstrBot 4.x 原生风格与完整纯 SVG 三层「运行监控」默认首页，新增单行全局默认摘要条与顶部隐式回退（`#route-alert`）/ 配置漂移（`#drift-alert`）告警横幅；「模型管理」新增「添加模型」弹窗入口与原地「编辑」弹窗（`setup/provider-update` 保留原 `provider_id` 避免旧绑定失效），思考默认档位按当前全局配置明示为 `跟随全局（CLI默认 / 低 / 中 / 高）`；切换下拉模型改用本地 `efforts_by_model` 缓存并暂停自动 `setup/check`，弹窗打开期间禁止后台轮询覆盖表单字段，暂态检测失败保留已有目录缓存。
+- **路由与配置一致性修复**：`agy_provider/routing.py`、`onboarding.py` 与 `main.py` 统一基于合并配置读取实例、计算 `modalities`（移除残留 `audio` 并对齐全局 `enable_images`）、统计非默认会话 Profile 覆盖数并检测漂移；新增 `setup/provider-repair`（单实例/批量同步修复）与 `setup/provider-impact` 受控下线流程（停用/删除当前全局默认时支持原子 `migrate_default_to` 与 `force_confirm` 显式确认）；`setup/apply` 支持 `create_only` 避免覆盖同底层模型配置；初始化与重载恢复后同步校准 `curr_provider_inst` 指针，同时保持持有 `manager.resource_lock` 期间不重入宿主更新/删除方法。
+- **验证**：全量离线 Python 回归 303 项运行通过（11 项平台/权限条件跳过）、Node 前端交互/监控回归 30/30、`compileall`、`check_sensitive.py` 与 `git diff --check` 全部通过（PR #37 Ubuntu/Windows × Python 3.11/3.12 矩阵通过）；已在测试宿主（AstrBot 4.29.4 容器）预部署验证零报错加载与服务启动，仍未覆盖真实 CLI 批量工具生成、macOS 及 AstrBot 4.30 环境。
+
+## 0.8.2（2026-11-25）
+
+- 修复 AstrBot 在持久化历史时移除临时用户文本，导致后续轮次误报 `history_rewrite` 并重建 ACP 会话的问题。可确认的临时文本仍发给模型，预期回放按宿主实际保存的内容计算。真实用户编辑仍触发重建。[#33](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/33) · [PR #35](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/35)
+- 离线回归覆盖严格及结构化模式、思考块回放、真实历史编辑和工具回填。PR 的 Ubuntu 与 Windows 矩阵已通过，真实 AGY 与生产效果待验证。[CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45433687834)
+
+## 0.8.1（2026-11-24；实机验收待 #31）
+
+- 前端选用 [feat/ui-redesign](https://github.com/sl251/astrbot_plugin_antigravity_acp/tree/feat/ui-redesign) 的最终可视化设计：环形占比、会话池分段条、上下文进度、Token 构成与耗时柱图、四步进度、连接状态、响应式布局和宿主主题。
+- 仅替换前端，保留 v0.8.0 的 #32 后端路由、历史图片预算、输入组织、防重放和脱敏持久失败记录。适配监控 schema v2、只读路由与失败诊断；设置与保存继续使用原生 Bridge 与 nonce。高级实例操作按钮不随旧界面恢复，可使用宿主原生模型管理；后端 API 保留。
+- 恢复原生 DOM 回归，保留 HTTP/受限 iframe 剪贴板降级和后台轮询生命周期。移除 Vue 构建目录与旧产物，分发不需要 Node.js。
+- 本版由跨平台 Python 回归及原生 JS 测试门控。实机、真实 CLI、生产与视觉验收待 #31；保留 v0.8.0 供回退。
+
+## 0.8.0（2026-11-24；实机验收待 #31）
+
+- **原生 Dashboard 重构（#30）**：Vue 3 / Vuetify 3 / TypeScript / Vite 六模块界面，使用宿主 Plugin Views Bridge、相对资源路径及本地字体/图标；保留 #28 的复制降级与轮询边界。
+- **模型路由（#32）**：默认模型保存同时校验 runner 配置与实际解析结果，区分配置主项、解析主项和服务观测；删除/停用前检查引用，扫描不完整时阻止操作。不全局修改宿主 resolver/delete_provider，不按同名模型自动迁移 ID。
+- **上下文与图片**：当前用户输入置于历史封套外，保持当前附件顺序；历史图片使用占位及指纹，不再占用本轮真实附件预算，保留当前图验证与会话复用边界。
+- **失败与副作用**：无有效正文、无工具交接的失败保留显式 fallback 资格；可见正文、工具交接及工具续轮失败禁止自动重放。工具前后分段过滤真实 CLI 告警，新增有界脱敏持久失败诊断，与 cost log 解耦。
+- **版本与分发**：统一 metadata、运行时单点版本常量与前端 package/lock；AstrBot `>=4.29.4,<4.30`，Python 3.11+，部署使用已构建的静态资源，无需 Node.js。
+- **验证与限制**：[#34](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/34) 最新实现提交 `107bef7` 的 [CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45379518123) 六组全部成功（Linux/Windows 前端构建一致性检查与 Python 3.11/3.12 回归）。旧 DOM 测试因旧 app.js 移除而跳过，不等同于新版交互验收。真实 AGY、AstrBot iframe、QQ、视觉与生产验收尚未执行（[#31](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/31)）；#32 §5 并发争用、池锁及专用 Agent 调查延期。建议先备份配置并在非生产环境验证；可回退至 v0.7.5。
+
 ## 0.7.5（正式发布，2026-11-22）
 
 - **修复 #28：设置面板复制按钮全部失效（含卡住 Google 登录）**：AstrBot 4.29.4 把插件页放进 `sandbox="allow-scripts allow-forms allow-downloads"` 的 iframe（无 `allow-same-origin`、无 `allow="clipboard-write"`、无 `allow-popups`），面板又通常经 `http://<ip>:6185` 访问（非安全上下文），此时 `navigator.clipboard` 为 `undefined`；原 `copy()` 只有 Clipboard API 一条路径，失败仅向页脚写一行小字。现改为三级降级：`navigator.clipboard?.writeText` → 点击手势内同步执行临时 `textarea` + `document.execCommand("copy")` → 两者都失败才选中原文并提示快捷键；4 类复制入口（安装命令、官方文档、授权链接、`复制命令`）均把按钮自身传入并就地显示「已复制 ✓ / 请手动复制」，`#copy-status` 改为底部居中浮层、3s 自动消失。授权链接新增「在新标签打开」，`window.open` 被 sandbox 拦截时明确提示改用复制。

@@ -32,6 +32,10 @@ and AstrBot v4.29.4 at
 These are linked references only; their source, schemas, binaries and account data
 are not vendored. No new runtime dependency is introduced.
 
+## Native Dashboard UI design baseline
+
+v0.8.1 uses the independent native HTML/JS/CSS visualization from feat/ui-redesign. Theme tokens reference AstrBot's dashboard; no Vue runtime or bundled fonts are distributed in this release. The v0.8.0 tag retains its original frontend and licenses.
+
 The DSH reference project's copyright and MIT license are retained below for the
 adapted configuration and protocol patterns:
 

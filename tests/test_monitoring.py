@@ -40,6 +40,10 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         self.provider.configure(Settings(cost_log_enabled=False, auth_bridge=False))
         self.manager = FakeManager()
         self.manager.acm.default_conf["dashboard"] = {"username": "panel-owner"}
+        self.manager.acm.default_conf["agent_runner"] = {
+            "runner_type": "local",
+            "config": {"model": {"provider_id": "one", "fallback_provider_ids": []}},
+        }
         self.context = types.SimpleNamespace(
             provider_manager=self.manager, registered_web_apis=[],
         )
@@ -53,9 +57,11 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         if previous is not None:
             sys.modules["agy_provider.provider"] = previous
 
-    def instance(self, identity, *, active=True):
+    def instance(self, identity, *, active=True, history_id=None):
         config = {"id": identity, "type": "agy_acp", "enable": True,
                   "model": "gemini-test", "custom_extra_body": {"agy_tools_mode": "chat"}}
+        if history_id:
+            config["agy_history_id"] = history_id
         self.manager.providers_config.append(config)
         if not active:
             return None
@@ -63,6 +69,52 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         self.manager.inst_map[identity] = inst
         self.addAsyncCleanup(inst.terminate)
         return inst
+
+    async def test_detailed_statistics_survive_runtime_and_store_restart(self):
+        from agy_provider.telemetry import daily_snapshot, failure_snapshot, start_diagnostics, stop_diagnostics
+
+        start_diagnostics(Path(self.temp.name))
+        self.addCleanup(stop_diagnostics)
+        old = self.instance("one", history_id="a" * 32)
+        meter = old.runtime.telemetry.start_turn(
+            provider="one", session_key_raw="private", model="gemini-test", mode="chat", effort="low")
+        meter.request_sent = True
+        meter.finish(status="error", error_code="TIMEOUT")
+        await old.terminate()
+        start_diagnostics(Path(self.temp.name))
+        config = self.manager.providers_config[0]
+        new = self.provider.AgyProvider({**config, "model": "gemini-new"}, {})
+        self.addAsyncCleanup(new.terminate)
+        self.manager.inst_map["one"] = new
+        row, = (await self.service.handle())["data"]["instances"]
+        self.assertEqual(row["history_storage"], "available")
+        self.assertEqual(row["summary"]["total_turns"], 1)
+        self.assertEqual(row["recent_turns"][0]["model"], "gemini-test")
+        self.assertTrue(row["recent_turns"][0]["historical"])
+        self.assertIsNone(row["summary"]["total_output"])
+        self.assertIsNone(row["latest_context"]["context_used"])
+        self.assertEqual(row["pool"]["active_sessions"], 0)
+        self.assertEqual(daily_snapshot()["days"][0]["requests"], 1)
+        self.assertEqual(len(failure_snapshot()["failure_events"]), 1)
+        self.assertEqual(new.runtime.telemetry.summarize()["candidate_turns"], 1)
+        self.assertFalse(new.runtime.telemetry.tombstones)
+
+        next_turn = new.runtime.telemetry.start_turn(
+            provider="one", session_key_raw="private", model="gemini-new", mode="chat", effort="low")
+        next_turn.request_sent = True
+        next_turn.reused = True
+        next_turn.finish(status="ok")
+        next_turn.finish(status="ok")
+        row, = (await self.service.handle())["data"]["instances"]
+        self.assertEqual(row["summary"]["reuse_rate"], 0.5)
+        self.assertEqual([t["model"] for t in row["recent_turns"]], ["gemini-new", "gemini-test"])
+        self.assertEqual(daily_snapshot()["days"][0]["requests"], 2)
+        self.assertEqual(len(failure_snapshot()["failure_events"]), 1)
+
+        for changed in ({"agy_history_id": "b" * 32}, {"id": "two"}, {"agy_history_id": None}):
+            other = self.provider.AgyProvider({**config, **changed}, {})
+            self.addAsyncCleanup(other.terminate)
+            self.assertEqual(other.runtime.telemetry.monitor_summary()["total_turns"], 0)
 
     async def test_status_contract_allowlist_and_instance_isolation(self):
         one, two = self.instance("one"), self.instance("two")
@@ -99,13 +151,40 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response["status_code"], 200)
             self.assertEqual(response["headers"]["Cache-Control"], "no-store")
             data = response["data"]
-            self.assertEqual(set(data), {"schema_version", "sampled_at", "window", "instances"})
-            self.assertEqual(data["schema_version"], 1)
+            self.assertEqual(
+                set(data),
+                {
+                    "schema_version",
+                    "routing",
+                    "failure_events",
+                    "failure_retention",
+                    "sampled_at",
+                    "window",
+                    "instances",
+                },
+            )
+            self.assertEqual(data["schema_version"], 2)
             self.assertIsNotNone(datetime.fromisoformat(data["sampled_at"]).tzinfo)
             self.assertEqual(data["window"], {"hours": 24, "max_turns_per_instance": 100})
             a, b, c = data["instances"]
-            self.assertEqual(set(a), {"provider_id", "model", "enabled", "tools_mode", "effective_mode",
-                                     "tools_enabled", "runtime_state", "pool", "summary", "latest_context", "recent_turns"})
+            self.assertEqual(
+                set(a),
+                {
+                    "provider_id",
+                    "provider_tag",
+                    "model",
+                    "enabled",
+                    "tools_mode",
+                    "effective_mode",
+                    "tools_enabled",
+                    "runtime_state",
+                    "pool",
+                    "summary",
+                    "latest_context",
+                    "history_storage",
+                    "recent_turns",
+                },
+            )
             self.assertEqual(set(a["pool"]), {"active_sessions", "max_sessions", "live_processes", "active_tool_turns"})
             self.assertEqual(a["pool"]["live_processes"], 1)
             self.assertEqual(set(a["summary"]), {
@@ -132,10 +211,15 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             turns = a["recent_turns"]
             self.assertEqual(len(turns), 20)
             self.assertEqual(set(turns[0]), {
-                "recorded_at", "model", "mode", "status", "error_code", "elapsed_ms",
+                "recorded_at", "model", "negotiated_model", "mode", "status", "error_code", "elapsed_ms",
                 "input_other", "input_cached", "output", "usage_status", "cache_fields_present",
                 "context_used", "context_window_size", "observed_at", "reused", "rebuild_reasons",
-                "prompt_bytes", "replay_bytes", "omitted_messages", "content_429_candidate"})
+                "prompt_bytes", "replay_bytes", "omitted_messages", "content_429_candidate",
+                "turn_id", "origin_turn_id", "logical_request_tag", "attempt", "cli_retry_attempt",
+                "chunk_seen", "body_seen", "body_streamed", "tool_handed_off", "tool_result_supplied",
+                "body_bytes", "thought_bytes", "stop_reason", "permission_denial_count",
+                "filtered_notice_count", "fallback_allowed", "fallback_reason",
+            })
             self.assertEqual(turns[0]["content_429_candidate"], {
                 "system_hash8": "1234abcd", "system_bytes": 42, "has_output": False, "attempt": 2})
             encoded = json.dumps(data)
@@ -181,9 +265,33 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response["status_code"], expected)
             self.assertEqual(response["headers"]["Cache-Control"], "no-store")
             if expected != 200:
-                self.assertNotIn("data", response)
+                code = "UNAUTHENTICATED" if expected == 401 else "FORBIDDEN"
+                self.assertEqual(response["data"], {"code": code})
+                self.assertTrue(response["message"].startswith(f"[AGY:{code}] "))
         self.manager.acm.default_conf.pop("dashboard")
         self.assertEqual((await self.service.handle())["status_code"], 403)
+
+    async def test_quota_and_daily_get_are_local_and_admin_only(self):
+        from agy_provider.quota import QuotaService
+        from agy_provider.telemetry import start_diagnostics, stop_diagnostics
+        start_diagnostics(Path(self.temp.name))
+        self.addCleanup(stop_diagnostics)
+        self.service.quota = QuotaService(Settings())
+        self.service.quota.refresh = AsyncMock()
+        self.service.register()
+        for path, handler, methods, _ in self.context.registered_web_apis:
+            self.assertEqual(methods, ["GET"])
+            if path.endswith("/status"):
+                continue
+            for who, code in ((None, 401), ("api_key:123", 403), ("ordinary", 403), ("panel-owner", 200)):
+                self.request.username = who
+                response = await handler()
+                self.assertEqual(response["status_code"], code)
+                self.assertEqual(response["headers"]["Cache-Control"], "no-store")
+                if code == 200 and "/daily/" in path:
+                    self.assertEqual(response["data"]["days"], [])
+                    self.assertEqual(response["data"]["range"]["days"], int(path.rsplit("/", 1)[-1]))
+        self.service.quota.refresh.assert_not_awaited()
 
     async def test_route_lifecycle_only_removes_owned_get_handler(self):
         self.service.register()
@@ -195,7 +303,18 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
         await self.service.close()
         await self.service.close()
         self.assertEqual(self.context.registered_web_apis, [replacement])
-        self.assertEqual((await handler())["status_code"], 503)
+        response = await handler()
+        self.assertEqual(response["status_code"], 503)
+        self.assertEqual(response["data"], {"code": "CLOSED"})
+        self.assertTrue(response["message"].startswith("[AGY:CLOSED] "))
+
+    async def test_unavailable_daily_storage_has_distinct_bridge_code(self):
+        with patch("agy_provider.monitoring.daily_snapshot", side_effect=OSError("path")):
+            response = await self.service.handle("daily/90")
+        self.assertEqual(response["status_code"], 503)
+        self.assertEqual(response["data"], {"code": "STORAGE_UNAVAILABLE"})
+        self.assertTrue(response["message"].startswith("[AGY:STORAGE_UNAVAILABLE] "))
+        self.assertNotIn("path", str(response))
 
     async def test_privacy_regression_safe_recent_turns_and_monitor_status(self):
         inst = self.instance("priv")
@@ -251,6 +370,11 @@ class MonitoringTests(unittest.IsolatedAsyncioTestCase):
             "input_other", "input_cached", "output", "usage_status", "cache_fields_present",
             "context_used", "context_window_size", "observed_at", "reused", "rebuild_reasons",
             "prompt_bytes", "replay_bytes", "omitted_messages", "content_429_candidate",
+            "negotiated_model", "turn_id", "origin_turn_id", "logical_request_tag",
+            "attempt", "cli_retry_attempt", "chunk_seen", "body_seen", "body_streamed",
+            "tool_handed_off", "tool_result_supplied", "body_bytes", "thought_bytes",
+            "stop_reason", "permission_denial_count", "filtered_notice_count",
+            "fallback_allowed", "fallback_reason",
         }
         projected = inst.runtime.telemetry.safe_recent_turns()
         self.assertEqual(len(projected), 1)

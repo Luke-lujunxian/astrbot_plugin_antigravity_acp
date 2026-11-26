@@ -94,6 +94,7 @@ class RetryNoticeGuard:
         self.error_code = ""
         self.state = UpstreamState.UNKNOWN
         self.fast_fail_code = ""
+        self.filtered_count = 0
         self.rate_limit_notices = 0
         self._rate_counted = False
         self._attempt = ""
@@ -106,6 +107,13 @@ class RetryNoticeGuard:
     @property
     def attempt_number(self) -> str | None:
         return self._attempt or None
+
+    def begin_segment(self):
+        # A recovered notice before a tool cannot classify a later empty reply.
+        # Keep prompt-level counters and evidence for telemetry.
+        self.error_code = ""
+        self.state = UpstreamState.UNKNOWN
+        self.detail_free = False
 
     def _possible(self, text):
         for head in self.heads:
@@ -165,6 +173,7 @@ class RetryNoticeGuard:
         self._notice_diagnostic = ""
 
     def _start_notice(self, candidate, *, can_continue):
+        self.filtered_count += 1
         self._end_continuation()
         self._rate_counted = False
         self.detail_free = False
@@ -252,7 +261,7 @@ class RetryNoticeGuard:
                     self.line_start = True
                     text = rest
                     continue
-                candidate = line.lstrip()
+                candidate = re.sub(r"^(⚠\ufe0f?)[ \t]+", r"\1 ", line.lstrip(), count=1)
                 can_continue = bool(self.header.match(candidate))
                 if can_continue or self.interrupt_header.match(candidate):
                     self.leading_blanks = ""
@@ -282,6 +291,8 @@ class RetryNoticeGuard:
             self._can_continue = False
             self.dropping = False
             self.diagnostic = ""
+            self.line_start = True
+            self.emitted = False
         return "".join(output)
 
 
@@ -330,4 +341,6 @@ class TerminalNoticeGuard:
             output.append(self.pending)
             self.line_start = self.pending.endswith(("\n", "\r"))
             self.pending = ""
+        if final:
+            self.line_start = True
         return "".join(output)
