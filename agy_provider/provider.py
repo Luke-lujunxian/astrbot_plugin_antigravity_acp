@@ -15,6 +15,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 from .builtin_tools import BuiltinDenied, builtin_tools_configured
 from .config import Settings
 from .errors import AgyError
+from .host_compat import max_steps_notice
 from .media import ImageFingerprints, prepare_media
 from .messages import digest, normalize
 from .paths import plugin_data_root
@@ -457,6 +458,9 @@ class AgyProvider(Provider):
         snapshot = ToolSnapshot(None)
         request = None
         continuation = bool(tool_calls_result)
+        final_notice = max_steps_notice(self, signal) if func_tool is None else None
+        finalizing = finalization_has_results = False
+        prior_delivery = False
         request_fingerprint: str | None = None
 
         try:
@@ -469,6 +473,9 @@ class AgyProvider(Provider):
                     raw_contexts = [*raw_contexts[:-1], latest]
             continuation = continuation or bool(
                 prompt is None and raw_contexts and raw_contexts[-1].get("role") == "tool"
+            )
+            finalization_has_results = final_notice is not None and any(
+                message.get("role") == "tool" for message in raw_contexts
             )
             if approver is not None and not inspect.iscoroutinefunction(approver):
                 raise AgyError(
@@ -576,6 +583,14 @@ class AgyProvider(Provider):
                 trusted_parts=kwargs.get("agy_context_parts"),
                 reuse_mode=self.settings.session_reuse_mode,
             )
+            finalizing = final_notice is not None and (
+                continuation or request.messages[-1]["content"] == final_notice
+            )
+            if finalizing:
+                allow_builtins = False
+                # The retained prompt owns its original meter until it closes.
+                prior_delivery = meter is not None and meter.replay_blocked
+                meter = None
             # Normalize validates any trusted split first; filtering its stable
             # system cannot promote a previously invalid split into trusted data.
             request.system = filter_host_capabilities(request.system)
@@ -619,11 +634,14 @@ class AgyProvider(Provider):
                     transient_bytes=len((request.transient_data or "").encode()),
                     tool_schema_bytes=snapshot.schema_bytes,
                 )
+                meter.no_fallback = prior_delivery
 
             if logical_request_id and meter.logical_request_tag is None:
                 meter.logical_request_tag = self.runtime.telemetry.opaque_tag(logical_request_id)
 
-            if not continuation and not is_existing_turn:
+            if continuation or (finalizing and finalization_has_results):
+                meter.tool_result_supplied = True
+            if not meter.tool_result_supplied and not is_existing_turn:
                 guard_check = await self.runtime.failure_guard.check(
                     (self.provider_id, selected),
                     request_fingerprint,
@@ -659,9 +677,11 @@ class AgyProvider(Provider):
                     model=diagnostic_model,
                     effort=effort if isinstance(effort, str) and effort in {"low", "medium", "high", "default"} else "",
                 )
-            if continuation:
+            if continuation or finalization_has_results:
                 meter.tool_result_supplied = True
-            if meter.replay_blocked and isinstance(exc, AgyError):
+            meter.no_fallback |= prior_delivery
+            replay_blocked = meter.replay_blocked or prior_delivery
+            if replay_blocked and isinstance(exc, AgyError):
                 exc.no_retry = exc.no_fallback = True
             if not meter.finished:
                 meter.finish(
@@ -670,11 +690,11 @@ class AgyProvider(Provider):
             if owns_existing_turn and self.runtime.turns.get(key) is existing_turn:
                 self.runtime.turns.pop(key, None)
                 await existing_turn.close()
-            if meter.replay_blocked and isinstance(exc, Exception) and not isinstance(exc, AgyError):
+            if replay_blocked and isinstance(exc, Exception) and not isinstance(exc, AgyError):
                 raise AgyError("UPSTREAM", "工具交接后失败，已停止本轮。", no_retry=True, no_fallback=True) from None
             raise
 
-        if key is not None and not owns_existing_turn and not continuation:
+        if key is not None and not owns_existing_turn and not meter.tool_result_supplied:
             # 同一会话存在其他调用方持有的进行中工具轮时，排队等待其结束而不误杀原会话。
             if (
                 self.runtime.callers
@@ -710,7 +730,7 @@ class AgyProvider(Provider):
                 )
                 raise
 
-        if snapshot.tools or owns_existing_turn or continuation:
+        if snapshot.tools or owns_existing_turn or continuation or finalizing:
             source = chat_events(
                 self.runtime,
                 request,
@@ -726,6 +746,7 @@ class AgyProvider(Provider):
                 request_fingerprint=request_fingerprint,
                 claimed_half_open=claimed_half_open,
                 allow_builtins=allow_builtins,
+                finalizing=finalizing,
             )
         else:
             source = self.runtime.stream(
@@ -742,8 +763,6 @@ class AgyProvider(Provider):
                 claimed_half_open=claimed_half_open,
                 allow_builtins=allow_builtins,
             )
-        if continuation:
-            meter.tool_result_supplied = True
         events = abortable(source, signal)
         text_parts, thoughts = [], []
         handed_off = False
@@ -804,7 +823,8 @@ class AgyProvider(Provider):
                 raise AgyError("EMPTY", "AGY 未返回最终响应。")
         except BuiltinDenied as exc:
             exit_status, exit_code = "error", exc.code
-            if meter.replay_blocked or handed_off or continuation:
+            if meter.replay_blocked or prior_delivery:
+                exc.no_retry = exc.no_fallback = True
                 raise
             # Runtime retired the failed native session and recorded its cost.
             # Deliver a local terminal message; a new user turn can proceed.
@@ -828,13 +848,13 @@ class AgyProvider(Provider):
                 exit_code = exc.code
                 # Surface an explicit failure after partial delivery. Neither
                 # this provider nor callers honoring no_retry may replay it.
-                if meter.replay_blocked:
+                if meter.replay_blocked or prior_delivery:
                     exc.no_retry = True
                     exc.no_fallback = True
             else:
                 exit_status = "error"
                 exit_code = "UPSTREAM"
-                if isinstance(exc, Exception) and meter.replay_blocked:
+                if isinstance(exc, Exception) and (meter.replay_blocked or prior_delivery):
                     raise AgyError(
                         "UPSTREAM", "本轮已输出内容或交接工具后失败；已停止，禁止自动重放。",
                         no_retry=True, no_fallback=True,
@@ -844,7 +864,7 @@ class AgyProvider(Provider):
             try:
                 await events.aclose()
             except Exception as exc:
-                if meter.replay_blocked or done_seen:
+                if meter.replay_blocked or prior_delivery or done_seen:
                     if isinstance(exc, AgyError):
                         exc.no_retry = exc.no_fallback = True
                         raise

@@ -7,11 +7,11 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-blue)
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.29.4%2C%3C4.30-orange)
-![Status](https://img.shields.io/badge/main-v0.8.5-brightgreen)
+![Status](https://img.shields.io/badge/main-v0.8.6-brightgreen)
 
 通过 Google 官方 `agy` 客户端内置的 ACP（Agent Client Protocol）协议，把 Antigravity 模型安全、稳定地接入 AstrBot，作为日常对话主力。
 
-> 💡 **主分支 v0.8.5（2026-11-26）**：打开运行监控时按需自动查询账号额度，60 秒内优先复用缓存；近 24 小时请求、耗时、Token 与会话复用统计可跨插件重载恢复（[#43](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/43) / [PR #44](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/44)）。会话池与当前上下文仍按实际运行状态显示，原有每日热力图不重复记账。可通过下方主分支 ZIP 或最新 Release 纯净包安装并重载插件。
+> 💡 **主分支 v0.8.6（2026-11-27）**：修复宿主工具执行超时后，晚带回的工具结果被当作过期回填（`TOOL_STALE`）的问题——会话、运行与历史都匹配时，用真实结果重新生成一次回答，而不是报错后让宿主切到 fallback；跑满步数后的收尾请求也不再报 `TOOL_CONTEXT`（[#45](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/45) / [PR #46](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/46)）。可通过下方主分支 ZIP 或最新 Release 纯净包安装并重载插件。
 
 ---
 
@@ -109,6 +109,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
   - `/agy quota` 手动查询官方 CLI 账号额度，`/agy usage [30|90|365]` 查看本地每日用量，`/agy help` 列出全部指令。
   - 进入运行监控时按需更新账号额度，60 秒内优先使用缓存。也可点击「刷新额度」立即查询。
   - QQ 私聊中 `/new` 正常、`/agy cost` 被当成聊天时，请在该会话实际使用的 AstrBot 配置「可用插件」中勾选 `astrbot_plugin_antigravity_acp` 并保存，再发 `/agy help`。
+- **工具跑得久之后出现 `TOOL_STALE` / `TOOL_TIMEOUT`，或回复与工具结果无关**：升级至含 #45 修复的 v0.8.6。工具执行超过 `tool_execution_timeout` 后，只要 ACP 会话仍存活且历史未被改写，晚带回的结果会用于一次无工具生成；否则返回 `TOOL_TIMEOUT` 且不自动重试。详情见 [宿主工具执行超时后的回填](docs/troubleshooting.md#宿主工具执行超时后的回填)。
 - **同一会话连续出现 `history_rewrite`**：升级至含 #33 修复的 v0.8.2 后，在同一会话连续发送消息，检查后续轮是否显示 `reused=true`。真实历史编辑等情况仍会触发重建。详情见 [会话复用排障](docs/troubleshooting.md#会话复用与历史重写)。
 
 ---
@@ -117,6 +118,7 @@ git clone --branch main https://github.com/sl251/astrbot_plugin_antigravity_acp.
 
 *(完整历史见 [`CHANGELOG.md`](./CHANGELOG.md))*
 
+- **v0.8.6**：工具执行超时后晚带回的结果在会话、运行与历史都匹配时重建一次无工具生成，不再抛 `TOOL_STALE` 或切到 fallback；不匹配时返回 `TOOL_TIMEOUT`。跑满步数后的收尾请求不再报 `TOOL_CONTEXT`（[#45](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/45) · [PR #46](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/46)）。
 - **v0.8.5**：额度按需自动刷新、60 秒缓存与失败冷却；新增有界 SQLite 监控明细持久化（24 小时、每实例最多 100 轮），重载后恢复请求、耗时、Token 与复用统计，存储异常时降级为内存统计（[#43](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/43) · [PR #44](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/44)）。
 - **v0.8.4**：新增独立「工具权限」页签（`setup/tool-policy`）、官方 CLI 账号额度查询（`setup/quota-refresh` / `monitor/quota`）与本地每日用量热力图（`monitor/daily/*`），精简工具权限说明、汉化额度窗口与折叠长列表并重构 `/agy` 管理员指令可读性（[#38](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/38) · [PR #39](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/39)）；完成 CLI `1.5.18` 原生工具协议实测，开放 `read_file` 至 `1.5.18` 与只读分页校验，解除原生工具对宿主 MCP 非空的依赖并修正非搜索拒止文案（[#41](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/41) · [PR #42](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/42)）。
 - **v0.8.3**：重构「运行监控 / 模型管理 / 环境与认证」三标签页、新增原位编辑（`provider-update`）与配置漂移修复（`provider-repair`）、支持受控默认迁移及思考「跟随全局」明示（[#36](https://github.com/sl251/astrbot_plugin_antigravity_acp/issues/36) · [PR #37](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/37)）。

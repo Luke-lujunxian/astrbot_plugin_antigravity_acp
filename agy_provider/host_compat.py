@@ -35,6 +35,24 @@ _patches: dict[type, _Patch] = {}
 _replay_scope: ContextVar[Any] = ContextVar("agy_replay_scope", default=None)
 
 
+def max_steps_notice(provider, signal) -> str | None:
+    """Read the 4.29.4 runner's forced step from the current request scope."""
+    scope = _replay_scope.get()
+    if scope is None or signal is None:
+        return None
+    runner = scope["runner"]
+    budget = getattr(runner, "_step_budget_max", None)
+    if (
+        runner.provider is provider
+        and signal is getattr(runner, "_abort_signal", None)
+        and getattr(getattr(runner, "req", None), "func_tool", None) is None
+        and budget is not None
+        and getattr(runner, "_step_budget_used", 0) > budget
+    ):
+        return getattr(runner, "MAX_STEPS_REACHED_PROMPT", None)
+    return None
+
+
 def _install_replay_guard(runner_cls, state):
     """4.29.4 catches all Exception instances even after stream output.
 

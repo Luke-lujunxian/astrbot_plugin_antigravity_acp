@@ -1,5 +1,11 @@
 # 变更记录
 
+## 0.8.6（2026-11-27）
+
+- **工具执行超时后的迟到结果重建（#45 / [PR #46](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/46)）**：宿主工具执行超过 `tool_execution_timeout` 后，插件不再关闭 ACP 会话，而是在会话上记一份超时交接。宿主晚带回闭合的工具结果时，校验同一宿主运行、未过 `idle_ttl`、会话存活、模型与上下文一致、历史前缀与原工具调用完全匹配、结果未提交过；全部通过则把真实结果按文本历史送入一次无工具生成。任一条件不满足时返回 `TOOL_TIMEOUT`（禁止重试与 fallback），不再误报「进程重载」；真正的进程重载或过期回填仍返回 `TOOL_STALE`。
+- **步数用尽后的收尾请求不再 `TOOL_CONTEXT`**：AstrBot 4.29.4 跑满 `max_steps` 后拔掉工具集再请求一次，带 `role=tool` 尾巴的请求续接带工具的旧 prompt 会抛 `TOOL_CONTEXT`。现在收尾请求以已闭合的文本历史重建、不带工具；跨运行、改写或重复的回填仍被拒绝。
+- **验证与限制**：PR #46 [CI](https://github.com/sl251/astrbot_plugin_antigravity_acp/actions/runs/45871142042) 四组 Ubuntu/Windows × Python 3.11/3.12 回归通过；本地另用 AstrBot 4.29.4 的 `tool_loop_agent_runner.py` 原文跑同一套 372 项通过，两组新回归走宿主真实代码。2026-11-27 已在一台 Linux Docker / AstrBot 4.29.4 实机部署并完成 webchat 一轮验证。线上触发该问题的长工具场景未在实机复现；当时「插件记录为不允许 fallback、宿主仍切到 fallback」的差异尚未查明。排障见 [troubleshooting](docs/troubleshooting.md)。
+
 ## 0.8.5（2026-11-26）
 
 - **账号额度自动刷新（#43 / [PR #44](https://github.com/sl251/astrbot_plugin_antigravity_acp/pull/44)）**：首次进入监控页、页面恢复及登录结束后先读取缓存，缺失或过期才通过官方 CLI 查询；60 秒成功缓存、并发合并、失败冷却与原手动强制刷新并存，GET 无副作用，无常驻额度轮询。

@@ -69,10 +69,13 @@ try:
             relay.stdin.write((json.dumps(request) + "\n").encode())
             relay.stdin.flush()
             reply = json.loads(relay.stdout.readline())
-            result = reply["result"]
-            answer = result["content"][0]["text"]
-            update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": answer}})
-            result = {"stopReason": "end_turn", "usage": {"inputTokens": 100, "outputTokens": 5}}
+            if reply.get("error", {}).get("message") == "TOOL_TIMEOUT":
+                result = {"stopReason": "cancelled"}
+            else:
+                result = reply["result"]
+                answer = result["content"][0]["text"]
+                update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": answer}})
+                result = {"stopReason": "end_turn", "usage": {"inputTokens": 100, "outputTokens": 5}}
         else:
             result = {}
         send({"id": obj["id"], "result": result})
